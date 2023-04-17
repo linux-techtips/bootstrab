@@ -1,11 +1,16 @@
 ---
-Checks:          '-*,clang-diagnostic-*,clang-analyzer-*,modernize-*,readability-*,bugprone-*, -bugprone-easily-swappable-parameters,concurrency-*,performance-*,portability-*,-readability-uppercase-literal-suffix'
+Checks:          '-*,clang-diagnostic-*,clang-analyzer-*,modernize-*,performance-*,bugprone-*,-bugprone-easily-swappable-parameters,concurrency-*,performance-*,portability-*,-readability-uppercase-literal-suffix,-readability-magic-numbers,'
 WarningsAsErrors: ''
 HeaderFilterRegex: ''
 AnalyzeTemporaryDtors: false
 FormatStyle:     none
 User:            m3rlin
 CheckOptions:
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.GlobalConstantCase: UPPER_CASE
   llvm-else-after-return.WarnOnConditionVariables: 'false'
   modernize-loop-convert.MinConfidence: reasonable
   modernize-replace-auto-ptr.IncludeStyle: llvm
@@ -23,6 +28,5 @@ CheckOptions:
   llvm-qualified-auto.AddConstToQualified: 'false'
   modernize-loop-convert.NamingStyle: CamelCase
   llvm-else-after-return.WarnOnUnfixable: 'false'
-  google-readability-function-size.StatementThreshold: '800'
 ...
 
