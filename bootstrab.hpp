@@ -21,7 +21,6 @@ static constexpr auto* PATH_SEP = "\\";
 #include <filesystem>
 #include <functional>
 #include <iostream>
-#include <utility>
 #include <vector>
 
 namespace std {
@@ -34,7 +33,20 @@ using CStr = char const*;
 using Fd   = int;
 using Pid  = pid_t;
 
+[[noreturn]] inline auto panic(CStr message, std::ostream& ostream = std::cerr)
+    -> void {
+    ostream << "[PANIC]: " << message << '\n';
+    std::abort();
+}
+
 namespace fs {
+
+    inline auto path_modified_after(const CStr path1, const CStr path2)
+        -> bool {
+        return std::fs::last_write_time(path1)
+            > std::fs::last_write_time(path2);
+    }
+
     template<typename T>
     concept DirectoryIterator = std::is_same_v<
                                     typename T::value_type,
@@ -165,11 +177,33 @@ namespace fs {
 
 }  // namespace fs
 
-[[noreturn]] inline auto panic(CStr message, std::ostream& ostream = std::cerr)
-    -> void {
-    ostream << "[PANIC]: " << message << '\n';
-    std::abort();
-}
+namespace env {
+
+#if defined(__clang__)
+    static constexpr auto* PARENT_COMPILER = "clang++";
+#elif defined(__GNUC__) || defined(__GNUG__)
+    static constexpr auto* PARENT_COMPILER = "g++";
+#elif defined(_MSC_VER)
+    // TODO (Makoto) Make sure this is correct.
+    static constexpr auto* PARENT_COMPILER = "msvc.exe";
+#elif defined(__MINGW32__) || defined(__MINGW64__)
+    // TODO (Makoto) Make sure this is correct.
+    static constexpr auto* PARENT_COMPILER = "mingw.exe";
+#endif
+
+#ifndef _WIN32
+    static constexpr auto* PATH_SEPARATOR = "\\";
+#else
+    static constexpr auto* PATH_SEPARATOR  = "/";
+#endif
+
+    struct Args: public std::vector<CStr> {
+        static auto from(const int argc, char** argv) -> Args {
+            return {std::vector<CStr>(argv, argv + argc)};
+        }
+    };
+
+}  // namespace env
 
 struct Pipe {
     Fd read;
@@ -496,6 +530,28 @@ struct TaskList: public std::vector<Command::Future> {
         return res;
     }
 };
+
+#define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
+
+inline auto rebuild_urself(const CStr source, const env::Args& args) -> void {
+    const auto* target = args[0];
+
+    if (!fs::path_modified_after(source, target)) {
+        return;
+    }
+
+    std::cout << "Rebuilding myself...\n";
+    Command::from(env::PARENT_COMPILER, "-std=c++20", source, "-o", target)
+        .run({});
+
+    auto run_cmd = Command::from(target);
+    run_cmd.args.insert(run_cmd.args.cend(), args.cbegin() + 1, args.cend());
+
+    run_cmd.run({.pipe = Pipe::Inherited()});
+
+    std::exit(0);  // NOLINT
+}
+
 }  // namespace bootstrab
 
 //#endif
