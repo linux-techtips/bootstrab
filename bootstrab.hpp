@@ -21,6 +21,7 @@ static constexpr auto* PATH_SEP = "\\";
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 namespace std {
@@ -30,6 +31,139 @@ namespace fs = filesystem;
 namespace bootstrab {
 
 using CStr = char const*;
+using Fd   = int;
+using Pid  = pid_t;
+
+namespace fs {
+    template<typename T>
+    concept DirectoryIterator = std::is_same_v<
+                                    typename T::value_type,
+                                    std::fs::directory_entry>
+        && !
+    std::is_const_v<T>;
+
+    template<typename T>
+    concept DirectoryPredicate = std::is_invocable_r_v<
+                                     bool,
+                                     std::decay_t<T>,
+                                     std::decay_t<std::fs::directory_entry>>
+        && !
+    std::is_const_v<T>;
+
+    template<DirectoryIterator Iter, DirectoryPredicate Pred>
+    struct DirectoryFilterIterator {
+        using iterator_category = typename std::input_iterator_tag;
+        using value_type        = typename Iter::value_type;
+        using difference_type   = typename Iter::difference_type;
+        using pointer           = typename Iter::pointer;
+        using reference         = typename Iter::reference;
+        using const_reference   = const typename Iter::reference;
+        using const_pointer     = const typename Iter::pointer;
+
+        Iter curr;
+        Iter last {};
+        Pred pred;
+
+        explicit DirectoryFilterIterator(Iter& it, Pred&& predicate) :
+            curr {it},
+            pred {predicate} {
+            this->next();
+        }
+
+        DirectoryFilterIterator() = default;
+
+        auto operator++() -> DirectoryFilterIterator& {
+            ++curr;
+            this->next();
+            return *this;
+        }
+
+        auto operator++(int) -> DirectoryFilterIterator& {
+            auto res = *this;
+            ++curr;
+            this->next();
+            return *this;
+        }
+
+        auto operator*() const -> const_reference {
+            return *curr;
+        }
+
+        auto operator->() const -> const_pointer {
+            return &(*curr);
+        }
+
+        friend auto operator==(
+            const DirectoryFilterIterator& lhs,
+            const DirectoryFilterIterator& rhs
+        ) -> bool {
+            return lhs.curr == rhs.curr;
+        }
+
+        friend auto operator!=(
+            const DirectoryFilterIterator& lhs,
+            const DirectoryFilterIterator& rhs
+        ) -> bool {
+            return !(lhs == rhs);
+        }
+
+        auto next() -> void {
+            for (; curr != last && !std::invoke(pred, *curr); ++curr) {
+            }
+        }
+    };
+
+    template<DirectoryIterator Iter, DirectoryPredicate Pred>
+    struct DirectoryFilter {
+        using value_type = typename Iter::
+            value_type;  // For compatibility reasons
+
+        using iterator       = DirectoryFilterIterator<Iter, Pred>;
+        using const_iterator = DirectoryFilterIterator<Iter, Pred>;
+
+        Iter curr;
+        Pred pred;
+
+        auto begin() -> iterator {
+            return iterator(curr, std::forward<Pred>(pred));
+        }
+
+        auto end() -> iterator {
+            return iterator();
+        }
+
+        auto cbegin() const -> const_iterator {
+            return const_iterator(curr, std::forward<Pred>(pred));
+        }
+
+        auto cend() const -> const_iterator {
+            return const_iterator();
+        }
+    };
+
+    template<DirectoryIterator Iter, DirectoryPredicate Pred>
+    inline auto filter(const Iter& it, Pred&& predicate)
+        -> DirectoryFilter<Iter, Pred> {
+        return {it, std::forward<Pred>(predicate)};
+    }
+
+    template<DirectoryPredicate Pred>
+    inline auto filter(const std::fs::path& path, Pred&& predicate)
+        -> DirectoryFilter<std::filesystem::directory_iterator, Pred> {
+        return {
+            std::filesystem::directory_iterator(path),
+            std::forward<Pred>(predicate)};
+    }
+
+    template<DirectoryPredicate Pred>
+    inline auto filter(const CStr path, Pred&& predicate)
+        -> DirectoryFilter<std::filesystem::directory_iterator, Pred> {
+        return {
+            std::filesystem::directory_iterator(std::fs::path(path)),
+            std::forward<Pred>(predicate)};
+    }
+
+}  // namespace fs
 
 [[noreturn]] inline auto panic(CStr message, std::ostream& ostream = std::cerr)
     -> void {
@@ -37,10 +171,7 @@ using CStr = char const*;
     std::abort();
 }
 
-using Fd  = int;
-using Pid = pid_t;
-
-struct alignas(8) Pipe {
+struct Pipe {
     Fd read;
     Fd write;
 
@@ -93,17 +224,10 @@ struct alignas(8) Pipe {
     }
 #endif
 
-#ifndef _WIN32
     auto deinit() const -> void {
         close(read);
         close(write);
     }
-
-#else  // TODO: (Makoto) Make work on windows
-    auto deinit() const -> void {
-        panic("This probably works fine on windows but I'm too lazy to check");
-    }
-#endif
 };
 
 struct Command {
@@ -131,11 +255,6 @@ struct Command {
 
     struct Config {
         bool verbose {false};
-
-        bool _padding0 {false};
-        short _padding1 {0};
-        int _padding2 {0};
-
         Pipe pipe {Pipe::Null()};
 
         ~Config() {
@@ -150,7 +269,7 @@ struct Command {
 
         (Command::from_base_case(res, std::forward<Args>(args)), ...);
 
-        return Command {std::move(res)};
+        return {std::move(res)};
     }
 
     static auto from_base_case(Argv& args, std::string& arg) -> void {
@@ -161,13 +280,10 @@ struct Command {
         args.emplace_back(path.string());
     }
 
-    static auto from_base_case(
-        Argv& args,
-        const std::fs::directory_iterator& it
-    ) -> void {
-        for (const auto& entry : it) {
-            auto str = entry.path().string();
-            args.push_back(entry.path().string());
+    template<fs::DirectoryIterator Iter>
+    static auto from_base_case(Argv& args, Iter& it) -> void {
+        for (auto& entry : it) {
+            Command::from_base_case(args, entry);
         }
     }
 
