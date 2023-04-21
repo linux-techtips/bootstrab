@@ -143,11 +143,11 @@ PenaltyBreakAssignment: 1000
 PenaltyBreakBeforeFirstCallParameter: 19
 PenaltyBreakComment: 300
 PenaltyBreakFirstLessLess: 120
-PenaltyBreakOpenParenthesis: 0
+PenaltyBreakOpenParenthesis: 80
 PenaltyBreakString: 1000
-PenaltyBreakTemplateDeclaration: 10
-PenaltyExcessCharacter: 1000000
-PenaltyReturnTypeOnItsOwnLine: 1000 
+PenaltyBreakTemplateDeclaration: 0
+PenaltyExcessCharacter: 100 
+PenaltyReturnTypeOnItsOwnLine: 1000000 
 PenaltyIndentedWhitespace: 0
 PointerAlignment: Left
 PPIndentWidth:   -1

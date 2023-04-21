@@ -1,29 +1,25 @@
-// #ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
+#ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
 
-#ifndef _WIN32  // LINUX INCLUDE
+    #ifndef _WIN32  // LINUX INCLUDE
 
-    #include <fcntl.h>
-    #include <sys/wait.h>
-    #include <unistd.h>
+        #include <fcntl.h>
+        #include <sys/wait.h>
+        #include <unistd.h>
 
-static constexpr auto* PATH_SEP = "/";
+    #else  // WINDOWS INCLUDE
 
-#else  // WINDOWS INCLUDE
+        #include <process.h>
+        #include <windows.h>
 
-    #include <process.h>
-    #include <windows.h>
+    #endif  // STD INCLUDE
 
-static constexpr auto* PATH_SEP = "\\";
+    #include <cstring>
+    #include <filesystem>
+    #include <functional>
+    #include <iostream>
+    #include <vector>
 
-#endif  // STD INCLUDE
-
-#include <cstring>
-#include <filesystem>
-#include <functional>
-#include <iostream>
-#include <vector>
-
-namespace std {
+namespace std {  // I await my seat on the C++ committee.
 namespace fs = filesystem;
 }
 
@@ -127,8 +123,7 @@ namespace fs {
 
     template<DirectoryIterator Iter, DirectoryPredicate Pred>
     struct DirectoryFilter {
-        using value_type = typename Iter::
-            value_type;  // For compatibility reasons
+        using value_type = typename Iter::value_type;  // For compatibility reasons
 
         using iterator       = DirectoryFilterIterator<Iter, Pred>;
         using const_iterator = DirectoryFilterIterator<Iter, Pred>;
@@ -177,25 +172,30 @@ namespace fs {
 
 }  // namespace fs
 
+    #ifndef _WIN32
+namespace sys {
+    static constexpr auto* PATH_SEP = "/";
+}  // namespace sys
+
+    #else
+namespace sys {
+    static constexpr auto* PATH_SEP = "\\";
+}  // namespace sys
+    #endif
+
 namespace env {
 
-#if defined(__clang__)
+    #if defined(__clang__)
     static constexpr auto* PARENT_COMPILER = "clang++";
-#elif defined(__GNUC__) || defined(__GNUG__)
+    #elif defined(__GNUC__) || defined(__GNUG__)
     static constexpr auto* PARENT_COMPILER = "g++";
-#elif defined(_MSC_VER)
+    #elif defined(_MSC_VER)
     // TODO (Makoto) Make sure this is correct.
-    static constexpr auto* PARENT_COMPILER = "msvc.exe";
-#elif defined(__MINGW32__) || defined(__MINGW64__)
+    static constexpr auto* PARENT_COMPILER = "cl.exe";
+    #elif defined(__MINGW32__) || defined(__MINGW64__)
     // TODO (Makoto) Make sure this is correct.
-    static constexpr auto* PARENT_COMPILER = "mingw.exe";
-#endif
-
-#ifndef _WIN32
-    static constexpr auto* PATH_SEPARATOR = "\\";
-#else
-    static constexpr auto* PATH_SEPARATOR  = "/";
-#endif
+    static constexpr auto* PARENT_COMPILER = "g++";
+    #endif
 
     struct Args: public std::vector<CStr> {
         static auto from(const int argc, char** argv) -> Args {
@@ -209,18 +209,18 @@ struct Pipe {
     Fd read;
     Fd write;
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto Inherited() -> Pipe {
         return {STDIN_FILENO, STDOUT_FILENO};
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto Inherited() -> Pipe {
         panic("haha imagine using windows");
     }
-#endif
+    #endif
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto Owned(Fd read, Fd write) -> Pipe {
         Fd pipefd[2];  // NOLINT modernize-avoid-c-arrays
         pipefd[0] = read;
@@ -233,13 +233,13 @@ struct Pipe {
         return {pipefd[0], pipefd[1]};
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto Owned(Fd read, Fd write) -> Pipe {
         panic("lol michaelsoft binbows");
     }
-#endif
+    #endif
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto Null() -> Pipe {
         Fd pipefd[2];  // NOLINT modernize-avoid-c-arrays
         pipefd[0] = open("/dev/null", O_RDONLY);
@@ -252,17 +252,28 @@ struct Pipe {
         return {pipefd[0], pipefd[1]};
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto Null() -> Pipe {
         panic("noooo windows nooooooo");
     }
-#endif
+    #endif
 
     auto deinit() const -> void {
         close(read);
         close(write);
     }
 };
+
+template<typename T>  // Why did my linter do this?
+concept IterableToString = requires(T it) {
+                               {
+                                   std::begin(it)
+                                   } -> std::input_or_output_iterator;
+                               {
+                                   std::end(it)
+                                   } -> std::input_or_output_iterator;
+                               std::is_convertible_v<decltype(*std::begin(it)), T>;
+                           };
 
 struct Command {
     // TODO: (Carter) This is inefficient, but a necessary evil for iterating over directories. Optimize later
@@ -306,22 +317,26 @@ struct Command {
         return {std::move(res)};
     }
 
-    static auto from_base_case(Argv& args, std::string& arg) -> void {
-        args.emplace_back(arg);
+    static auto from_base_case(Argv& args, std::string&& arg) -> void {
+        args.push_back(std::forward<std::string>(arg));
     }
 
-    static auto from_base_case(Argv& args, const std::fs::path& path) -> void {
-        args.emplace_back(path.string());
-    }
-
-    template<fs::DirectoryIterator Iter>
-    static auto from_base_case(Argv& args, Iter& it) -> void {
-        for (auto& entry : it) {
-            Command::from_base_case(args, entry);
+    template<IterableToString T>
+    static auto from_base_case(Argv& args, T& it) -> void {
+        for (const auto& entry : it) {
+            args.push_back(entry);
         }
     }
 
-#ifndef _WIN32
+    template<fs::DirectoryIterator Iter, fs::DirectoryPredicate Pred>
+    static auto from_base_case(Argv& args, fs::DirectoryFilter<Iter, Pred>& it)
+        -> void {
+        for (const auto& entry : it) {
+            args.push_back(entry.path().string());
+        }
+    }
+
+    #ifndef _WIN32
     static auto process_wait(Pid pid) -> Status {
         auto status = 0;
         waitpid(pid, &status, 0);
@@ -333,13 +348,13 @@ struct Command {
         panic("Process did not execute properly.");
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto process_wait(Pid pid) -> Status {
         panic("I bet windows does processes really weird");
     }
-#endif
+    #endif
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto exec(
         const std::vector<CStr>& args,
         const Pipe pipe,
@@ -381,11 +396,11 @@ struct Command {
         return child_pid;
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto exec() -> Pid {
         panic("Good luck on this one");
     }
-#endif
+    #endif
 
     [[nodiscard]] auto c_str_args() const -> std::vector<CStr> {
         auto cstr_args = std::vector<CStr> {};
@@ -531,27 +546,35 @@ struct TaskList: public std::vector<Command::Future> {
     }
 };
 
-#define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
+    #define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
 
-inline auto rebuild_urself(const CStr source, const env::Args& args) -> void {
+constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
+    -> void {
     const auto* target = args[0];
-
     if (!fs::path_modified_after(source, target)) {
         return;
     }
 
-    std::cout << "Rebuilding myself...\n";
+    std::cout << "Change detected, rebuilding...\n";
+
+    #if defined(_MSC_VER)  // TODO: (Makoto) Make sure this is correct
+    Command::from(
+        env::PARENT_COMPILER,
+        "/EHsc",
+        "/std:c++20",
+        source,
+        std::string {"/Fe:"} + target
+    )
+        .run({});
+    #else
     Command::from(env::PARENT_COMPILER, "-std=c++20", source, "-o", target)
         .run({});
-
-    auto run_cmd = Command::from(target);
-    run_cmd.args.insert(run_cmd.args.cend(), args.cbegin() + 1, args.cend());
-
-    run_cmd.run({.pipe = Pipe::Inherited()});
+    #endif
+    Command::from(target, args).run({.pipe = Pipe::Inherited()});
 
     std::exit(0);  // NOLINT
 }
 
 }  // namespace bootstrab
 
-//#endif
+#endif
