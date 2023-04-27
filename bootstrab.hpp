@@ -1,23 +1,30 @@
-#ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
+// #ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
 
-    #ifndef _WIN32  // LINUX INCLUDE
+#include <filesystem>
+#include <functional>
+#include <iostream>
+#include <vector>
 
-        #include <fcntl.h>
-        #include <sys/wait.h>
-        #include <unistd.h>
+#ifndef _WIN32  // LINUX INCLUDE
+namespace sys {
+    #include <fcntl.h>
+    #include <sys/wait.h>
+    #include <unistd.h>
 
-    #else  // WINDOWS INCLUDE
+    constexpr auto* PATH_SEP = "/";
+    static const auto dev_null_fd_read = open("/dev/null", O_RDONLY);
+    static const auto dev_null_fd_write = open("/dev/null", O_WRONLY);
+}
 
-        #include <process.h>
-        #include <windows.h>
+#else  // WINDOWS INCLUDE
+namespace sys {
+    #include <process.h>
+    #include <windows.h>
 
-    #endif  // STD INCLUDE
+    constexpr auto* PATH_SEP = "//";
+}
 
-    #include <cstring>
-    #include <filesystem>
-    #include <functional>
-    #include <iostream>
-    #include <vector>
+#endif
 
 namespace std {  // I await my seat on the C++ committee.
 namespace fs = filesystem;
@@ -29,7 +36,7 @@ using CStr = char const*;
 using Fd   = int;
 using Pid  = pid_t;
 
-[[noreturn]] inline auto panic(CStr message, std::ostream& ostream = std::cerr)
+[[noreturn]] inline auto panic(const CStr message, std::ostream& ostream = std::cerr)
     -> void {
     ostream << "[PANIC]: " << message << '\n';
     std::abort();
@@ -39,8 +46,22 @@ namespace fs {
 
     inline auto path_modified_after(const CStr path1, const CStr path2)
         -> bool {
-        return std::fs::last_write_time(path1)
-            > std::fs::last_write_time(path2);
+        auto path1_write_time = std::fs::file_time_type {};
+        auto path2_write_time = std::fs::file_time_type {};
+
+        try {
+            path1_write_time = std::fs::last_write_time(path1);
+        } catch(std::fs::filesystem_error) {
+            return false;
+        }
+
+        try {
+            path2_write_time = std::fs::last_write_time(path2);
+        } catch(std::fs::filesystem_error) {
+            return true;
+        }
+
+        return path1_write_time > path2_write_time;
     }
 
     template<typename T>
@@ -59,7 +80,7 @@ namespace fs {
     std::is_const_v<T>;
 
     template<DirectoryIterator Iter, DirectoryPredicate Pred>
-    struct DirectoryFilterIterator {
+    struct DirectoryFilterIterator { // I hate C++ iterators
         using iterator_category = typename std::input_iterator_tag;
         using value_type        = typename Iter::value_type;
         using difference_type   = typename Iter::difference_type;
@@ -123,7 +144,7 @@ namespace fs {
 
     template<DirectoryIterator Iter, DirectoryPredicate Pred>
     struct DirectoryFilter {
-        using value_type = typename Iter::value_type;  // For compatibility reasons
+        using value_type = typename Iter::value_type;  // Not standard, but for compatibility.
 
         using iterator       = DirectoryFilterIterator<Iter, Pred>;
         using const_iterator = DirectoryFilterIterator<Iter, Pred>;
@@ -172,30 +193,19 @@ namespace fs {
 
 }  // namespace fs
 
-    #ifndef _WIN32
-namespace sys {
-    static constexpr auto* PATH_SEP = "/";
-}  // namespace sys
-
-    #else
-namespace sys {
-    static constexpr auto* PATH_SEP = "\\";
-}  // namespace sys
-    #endif
-
 namespace env {
 
-    #if defined(__clang__)
+#if defined(__clang__)
     static constexpr auto* PARENT_COMPILER = "clang++";
-    #elif defined(__GNUC__) || defined(__GNUG__)
+#elif defined(__GNUC__) || defined(__GNUG__)
     static constexpr auto* PARENT_COMPILER = "g++";
-    #elif defined(_MSC_VER)
+#elif defined(_MSC_VER)
     // TODO (Makoto) Make sure this is correct.
     static constexpr auto* PARENT_COMPILER = "cl.exe";
-    #elif defined(__MINGW32__) || defined(__MINGW64__)
+#elif defined(__MINGW32__) || defined(__MINGW64__)
     // TODO (Makoto) Make sure this is correct.
     static constexpr auto* PARENT_COMPILER = "g++";
-    #endif
+#endif
 
     struct Args: public std::vector<CStr> {
         static auto from(const int argc, char** argv) -> Args {
@@ -209,58 +219,51 @@ struct Pipe {
     Fd read;
     Fd write;
 
-    #ifndef _WIN32
+#ifndef _WIN32
     static auto Inherited() -> Pipe {
         return {STDIN_FILENO, STDOUT_FILENO};
     }
 
-    #else  // TODO: (Makoto) Make work on windows
+#else  // TODO: (Makoto) Make work on windows
     static auto Inherited() -> Pipe {
         panic("haha imagine using windows");
     }
-    #endif
+#endif
 
-    #ifndef _WIN32
+#ifndef _WIN32
     static auto Owned(Fd read, Fd write) -> Pipe {
-        Fd pipefd[2];  // NOLINT modernize-avoid-c-arrays
+        Fd pipefd[2];  // NOLINT
         pipefd[0] = read;
         pipefd[1] = write;
 
-        if (pipe(pipefd) != 0) {
+        if (sys::pipe(pipefd) != 0) {
             panic("Failed to create pipe.");
         }
 
         return {pipefd[0], pipefd[1]};
     }
 
-    #else  // TODO: (Makoto) Make work on windows
+#else  // TODO: (Makoto) Make work on windows
     static auto Owned(Fd read, Fd write) -> Pipe {
         panic("lol michaelsoft binbows");
     }
-    #endif
+#endif
 
-    #ifndef _WIN32
+#ifndef _WIN32
     static auto Null() -> Pipe {
-        Fd pipefd[2];  // NOLINT modernize-avoid-c-arrays
-        pipefd[0] = open("/dev/null", O_RDONLY);
-        pipefd[1] = open("/dev/null", O_WRONLY);
-
-        if (pipefd[0] == -1 || pipefd[1] == -1) {
-            panic("Failed to open /dev/null.");
-        }
-
-        return {pipefd[0], pipefd[1]};
+        // if you can't open /dev/null, you have bigger issues than an error on your build script
+        return {sys::dev_null_fd_read, sys::dev_null_fd_write};
     }
 
-    #else  // TODO: (Makoto) Make work on windows
+#else  // TODO: (Makoto) Make work on windows
     static auto Null() -> Pipe {
         panic("noooo windows nooooooo");
     }
-    #endif
+#endif
 
-    auto deinit() const -> void {
-        close(read);
-        close(write);
+    auto deinit() -> void {
+        sys::close(read);
+        sys::close(write);
     }
 };
 
@@ -299,8 +302,8 @@ struct Command {
     };
 
     struct Config {
-        bool verbose {false};
         Pipe pipe {Pipe::Null()};
+        bool verbose {false};
 
         ~Config() {
             pipe.deinit();
@@ -317,8 +320,17 @@ struct Command {
         return {std::move(res)};
     }
 
+    // Don't ask me why
     static auto from_base_case(Argv& args, std::string&& arg) -> void {
         args.push_back(std::forward<std::string>(arg));
+    }
+
+    static auto from_base_case(Argv& args, std::string& arg) -> void {
+        args.push_back(arg);
+    }
+
+    static auto from_base_case(Argv& args, const std::string& arg) -> void {
+        args.push_back(arg);
     }
 
     template<IterableToString T>
@@ -336,10 +348,10 @@ struct Command {
         }
     }
 
-    #ifndef _WIN32
+#ifndef _WIN32
     static auto process_wait(Pid pid) -> Status {
         auto status = 0;
-        waitpid(pid, &status, 0);
+        sys::waitpid(pid, &status, 0);
 
         if (WIFEXITED(status)) {
             return WEXITSTATUS(status);
@@ -348,59 +360,53 @@ struct Command {
         panic("Process did not execute properly.");
     }
 
-    #else  // TODO: (Makoto) Make work on windows
+#else  // TODO: (Makoto) Make work on windows
     static auto process_wait(Pid pid) -> Status {
         panic("I bet windows does processes really weird");
     }
-    #endif
+#endif
 
-    #ifndef _WIN32
-    static auto exec(
-        const std::vector<CStr>& args,
-        const Pipe pipe,
-        const bool verbose
+#ifndef _WIN32
+    auto exec(
+        const Config& config
     ) -> Pid {
-        // TODO: (Carter) Reduce the amount of write syscalls
-        if (verbose) {
-            // Accounting for nullptr termination
-            const auto end = args.cend() - 2;
-            for (auto it = args.cbegin(); it != args.cend() - 1; ++it) {
-                write(pipe.write, *it, std::strlen(*it) + 1);
-                if (it != end) {
-                    write(pipe.write, " ", 1);
-                }
-            }
-            write(pipe.write, "\n", 1);
+        if (config.verbose) {
+            std::cerr << "[INFO]: " << *this << '\n';
         }
 
-        auto child_pid = fork();
+        auto child_pid = sys::fork();
         if (child_pid < 0) {
             panic("Failed to fork process.");
+        
         }
-
+        
         if (child_pid == 0) {
-            if (dup2(pipe.read, STDIN_FILENO) < 0) {
-                panic("Failed to setup stdin for child process.");
+            const auto& fd_read = config.pipe.read;
+            const auto& fd_write = config.pipe.write;
+
+            if (fd_read != STDIN_FILENO) {
+                sys::dup2(fd_read, STDIN_FILENO);
             }
 
-            if (dup2(pipe.write, STDOUT_FILENO) < 0) {
-                panic("Failed to setup stdout for child process.");
+            // git will not like you if you try to pipe to /dev/null
+            if (fd_write != STDOUT_FILENO) {
+                sys::dup2(fd_write, STDOUT_FILENO);
             }
 
-            if (execvp(args.front(), const_cast<char* const*>(args.data()))
-                != 0) {
-                panic("Failed to exec child process.");
+            const auto& argv = this->c_str_args();
+            if (sys::execvp(argv.front(), const_cast<char* const*>(argv.data())) != 0) {
+                panic("Task exited abnormally.");
             }
         }
 
         return child_pid;
     }
 
-    #else  // TODO: (Makoto) Make work on windows
-    static auto exec() -> Pid {
+#else  // TODO: (Makoto) Make work on windows
+    auto exec(const Config& config) -> Pid {
         panic("Good luck on this one");
     }
-    #endif
+#endif
 
     [[nodiscard]] auto c_str_args() const -> std::vector<CStr> {
         auto cstr_args = std::vector<CStr> {};
@@ -415,22 +421,12 @@ struct Command {
     }
 
     auto run(const Config& config) -> Status {
-        const auto child_pid = Command::exec(
-            this->c_str_args(),
-            config.pipe,
-            config.verbose
-        );
-
+        const auto child_pid = Command::exec(config);
         return Command::process_wait(child_pid);
     }
 
     auto run_async(const Config& config) -> Future {
-        const auto child_pid = Command::exec(
-            this->c_str_args(),
-            config.pipe,
-            config.verbose
-        );
-
+        const auto child_pid = Command::exec(config);
         return Future::from(child_pid);
     }
 
@@ -460,73 +456,6 @@ struct Command {
     }
 };
 
-struct NullOpt {
-    friend auto operator<<(
-        std::ostream& ostream,
-        [[maybe_unused]] const NullOpt& nullopt
-    ) -> std::ostream& {
-        return ostream << "None";
-    }
-};
-
-template<typename T = NullOpt>
-struct Opt {
-    [[no_unique_address]] T value;
-
-    [[nodiscard]] constexpr auto is_some() const -> bool {
-        return std::is_same_v<T, NullOpt>;
-    }
-
-    [[nodiscard]] constexpr auto is_none() const -> bool {
-        return !this->is_some();
-    }
-
-    [[nodiscard]] constexpr auto unwrap() const -> T {
-        if constexpr (std::is_same_v<T, NullOpt>) {
-            panic("Tried to unwrap nullopt.");
-        } else {
-            return value;
-        }
-    }
-
-    [[nodiscard]] constexpr auto unwrap_or(T&& val) const -> T {
-        if constexpr (std::is_same_v<T, NullOpt>) {
-            return std::forward<T>(val);
-        } else {
-            return val;
-        }
-    }
-
-    template<typename Fn>
-        requires(std::is_invocable_v<Fn>
-                 && std::is_same_v<T, std::invoke_result_t<Fn>>)
-    [[nodiscard]] constexpr auto unwrap_or_else(Fn&& fn) const -> T {
-        if constexpr (std::is_same_v<T, NullOpt>) {
-            return std::invoke(std::forward<Fn>(fn));
-        } else {
-            return value;
-        }
-    }
-
-    friend auto operator<<(std::ostream& ostream, const Opt& opt)
-        -> std::ostream& {
-        if constexpr (opt.is_some()) {
-            return ostream << "Some(" << opt.value << ")";
-        } else {
-            return ostream << "None";
-        }
-    }
-};
-
-namespace fs {}  // namespace fs
-
-template<typename T>
-constexpr inline auto Some(T&& value) -> Opt<T> {
-    return Opt<T> {std::forward<T>(value)};
-}
-
-static constexpr auto None = Opt<NullOpt> {};
-
 // TODO: (Carter) Make TaskLists lazy and non-inherited.
 struct TaskList: public std::vector<Command::Future> {
     using std::vector<Command::Future>::vector;
@@ -546,7 +475,7 @@ struct TaskList: public std::vector<Command::Future> {
     }
 };
 
-    #define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
+#define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
 
 constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
     -> void {
@@ -557,7 +486,7 @@ constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
 
     std::cout << "Change detected, rebuilding...\n";
 
-    #if defined(_MSC_VER)  // TODO: (Makoto) Make sure this is correct
+#if defined(_MSC_VER)  // TODO: (Makoto) Make sure this is correct
     Command::from(
         env::PARENT_COMPILER,
         "/EHsc",
@@ -566,10 +495,10 @@ constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
         std::string {"/Fe:"} + target
     )
         .run({});
-    #else
+#else
     Command::from(env::PARENT_COMPILER, "-std=c++20", source, "-o", target)
         .run({});
-    #endif
+#endif
     Command::from(target, args).run({.pipe = Pipe::Inherited()});
 
     std::exit(0);  // NOLINT
@@ -577,4 +506,4 @@ constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
 
 }  // namespace bootstrab
 
-#endif
+//#endif
