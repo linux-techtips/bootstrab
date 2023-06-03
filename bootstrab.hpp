@@ -1,30 +1,30 @@
-// #ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
+#ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
 
-#include <filesystem>
-#include <functional>
-#include <iostream>
-#include <vector>
+    #include <filesystem>
+    #include <functional>
+    #include <iostream>
+    #include <vector>
 
-#ifndef _WIN32  // LINUX INCLUDE
+    #ifndef _WIN32  // LINUX INCLUDE
 namespace sys {
-    #include <fcntl.h>
-    #include <sys/wait.h>
-    #include <unistd.h>
+        #include <fcntl.h>
+        #include <sys/wait.h>
+        #include <unistd.h>
 
-    constexpr auto* PATH_SEP = "/";
-    static const auto dev_null_fd_read = open("/dev/null", O_RDONLY);
-    static const auto dev_null_fd_write = open("/dev/null", O_WRONLY);
-}
+constexpr auto* PATH_SEP            = "/";
+static const auto dev_null_fd_read  = open("/dev/null", O_RDONLY);
+static const auto dev_null_fd_write = open("/dev/null", O_WRONLY);
+}  // namespace sys
 
-#else  // WINDOWS INCLUDE
+    #else  // WINDOWS INCLUDE
 namespace sys {
-    #include <process.h>
-    #include <windows.h>
+        #include <process.h>
+        #include <windows.h>
 
-    constexpr auto* PATH_SEP = "//";
-}
+constexpr auto* PATH_SEP = "//";
+}  // namespace sys
 
-#endif
+    #endif
 
 namespace std {  // I await my seat on the C++ committee.
 namespace fs = filesystem;
@@ -36,8 +36,10 @@ using CStr = char const*;
 using Fd   = int;
 using Pid  = pid_t;
 
-[[noreturn]] inline auto panic(const CStr message, std::ostream& ostream = std::cerr)
-    -> void {
+[[noreturn]] inline auto panic(
+    const CStr message,
+    std::ostream& ostream = std::cerr
+) -> void {
     ostream << "[PANIC]: " << message << '\n';
     std::abort();
 }
@@ -51,13 +53,13 @@ namespace fs {
 
         try {
             path1_write_time = std::fs::last_write_time(path1);
-        } catch(std::fs::filesystem_error) {
+        } catch (std::fs::filesystem_error) {
             return false;
         }
 
         try {
             path2_write_time = std::fs::last_write_time(path2);
-        } catch(std::fs::filesystem_error) {
+        } catch (std::fs::filesystem_error) {
             return true;
         }
 
@@ -80,7 +82,7 @@ namespace fs {
     std::is_const_v<T>;
 
     template<DirectoryIterator Iter, DirectoryPredicate Pred>
-    struct DirectoryFilterIterator { // I hate C++ iterators
+    struct DirectoryFilterIterator {  // I hate C++ iterators
         using iterator_category = typename std::input_iterator_tag;
         using value_type        = typename Iter::value_type;
         using difference_type   = typename Iter::difference_type;
@@ -144,7 +146,8 @@ namespace fs {
 
     template<DirectoryIterator Iter, DirectoryPredicate Pred>
     struct DirectoryFilter {
-        using value_type = typename Iter::value_type;  // Not standard, but for compatibility.
+        using value_type = typename Iter::
+            value_type;  // Not standard, but for compatibility.
 
         using iterator       = DirectoryFilterIterator<Iter, Pred>;
         using const_iterator = DirectoryFilterIterator<Iter, Pred>;
@@ -195,17 +198,17 @@ namespace fs {
 
 namespace env {
 
-#if defined(__clang__)
+    #if defined(__clang__)
     static constexpr auto* PARENT_COMPILER = "clang++";
-#elif defined(__GNUC__) || defined(__GNUG__)
+    #elif defined(__GNUC__) || defined(__GNUG__)
     static constexpr auto* PARENT_COMPILER = "g++";
-#elif defined(_MSC_VER)
+    #elif defined(_MSC_VER)
     // TODO (Makoto) Make sure this is correct.
     static constexpr auto* PARENT_COMPILER = "cl.exe";
-#elif defined(__MINGW32__) || defined(__MINGW64__)
+    #elif defined(__MINGW32__) || defined(__MINGW64__)
     // TODO (Makoto) Make sure this is correct.
     static constexpr auto* PARENT_COMPILER = "g++";
-#endif
+    #endif
 
     struct Args: public std::vector<CStr> {
         static auto from(const int argc, char** argv) -> Args {
@@ -219,18 +222,18 @@ struct Pipe {
     Fd read;
     Fd write;
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto Inherited() -> Pipe {
         return {STDIN_FILENO, STDOUT_FILENO};
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto Inherited() -> Pipe {
         panic("haha imagine using windows");
     }
-#endif
+    #endif
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto Owned(Fd read, Fd write) -> Pipe {
         Fd pipefd[2];  // NOLINT
         pipefd[0] = read;
@@ -243,23 +246,23 @@ struct Pipe {
         return {pipefd[0], pipefd[1]};
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto Owned(Fd read, Fd write) -> Pipe {
         panic("lol michaelsoft binbows");
     }
-#endif
+    #endif
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto Null() -> Pipe {
         // if you can't open /dev/null, you have bigger issues than an error on your build script
         return {sys::dev_null_fd_read, sys::dev_null_fd_write};
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto Null() -> Pipe {
         panic("noooo windows nooooooo");
     }
-#endif
+    #endif
 
     auto deinit() -> void {
         sys::close(read);
@@ -348,7 +351,7 @@ struct Command {
         }
     }
 
-#ifndef _WIN32
+    #ifndef _WIN32
     static auto process_wait(Pid pid) -> Status {
         auto status = 0;
         sys::waitpid(pid, &status, 0);
@@ -360,16 +363,14 @@ struct Command {
         panic("Process did not execute properly.");
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     static auto process_wait(Pid pid) -> Status {
         panic("I bet windows does processes really weird");
     }
-#endif
+    #endif
 
-#ifndef _WIN32
-    auto exec(
-        const Config& config
-    ) -> Pid {
+    #ifndef _WIN32
+    auto exec(const Config& config) -> Pid {
         if (config.verbose) {
             std::cerr << "[INFO]: " << *this << '\n';
         }
@@ -377,11 +378,10 @@ struct Command {
         auto child_pid = sys::fork();
         if (child_pid < 0) {
             panic("Failed to fork process.");
-        
         }
-        
+
         if (child_pid == 0) {
-            const auto& fd_read = config.pipe.read;
+            const auto& fd_read  = config.pipe.read;
             const auto& fd_write = config.pipe.write;
 
             if (fd_read != STDIN_FILENO) {
@@ -394,7 +394,8 @@ struct Command {
             }
 
             const auto& argv = this->c_str_args();
-            if (sys::execvp(argv.front(), const_cast<char* const*>(argv.data())) != 0) {
+            if (sys::execvp(argv.front(), const_cast<char* const*>(argv.data()))
+                != 0) {
                 panic("Task exited abnormally.");
             }
         }
@@ -402,11 +403,11 @@ struct Command {
         return child_pid;
     }
 
-#else  // TODO: (Makoto) Make work on windows
+    #else  // TODO: (Makoto) Make work on windows
     auto exec(const Config& config) -> Pid {
         panic("Good luck on this one");
     }
-#endif
+    #endif
 
     [[nodiscard]] auto c_str_args() const -> std::vector<CStr> {
         auto cstr_args = std::vector<CStr> {};
@@ -475,7 +476,7 @@ struct TaskList: public std::vector<Command::Future> {
     }
 };
 
-#define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
+    #define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
 
 constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
     -> void {
@@ -486,7 +487,7 @@ constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
 
     std::cout << "Change detected, rebuilding...\n";
 
-#if defined(_MSC_VER)  // TODO: (Makoto) Make sure this is correct
+    #if defined(_MSC_VER)  // TODO: (Makoto) Make sure this is correct
     Command::from(
         env::PARENT_COMPILER,
         "/EHsc",
@@ -495,10 +496,10 @@ constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
         std::string {"/Fe:"} + target
     )
         .run({});
-#else
+    #else
     Command::from(env::PARENT_COMPILER, "-std=c++20", source, "-o", target)
         .run({});
-#endif
+    #endif
     Command::from(target, args).run({.pipe = Pipe::Inherited()});
 
     std::exit(0);  // NOLINT
@@ -506,4 +507,4 @@ constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
 
 }  // namespace bootstrab
 
-//#endif
+#endif
