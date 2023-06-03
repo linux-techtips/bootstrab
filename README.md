@@ -50,12 +50,12 @@ For more usage information, check out [examples](examples).
 
 ## TODO
 
-- [] File Embedding
-- [] Environment Integration
-- [] Multi-threading rework
-- [] Compile-Time code generation
-- [] Hot Code Reloading
-- [] Conditional Recompilation
-- [] Git Integration
-- [] Windows support (LOL)
-- [] Optimizsationsz
+- [ ] File Embedding
+- [ ] Environment Integration
+- [ ] Multi-threading rework
+- [ ] Compile-Time code generation
+- [ ] Hot Code Reloading
+- [ ] Conditional Recompilation
+- [ ] Git Integration
+- [ ] Windows support (LOL)
+- [ ] Optimizsationsz
