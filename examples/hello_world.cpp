@@ -1,14 +1,14 @@
-#define BOOTSTRAB_IMPLEMENTATION
+#define BSTB_IMPL 
 #include "../bootstrab.hpp"
 
-using namespace bootstrab;
+using namespace bstb;
 
 auto main() -> int {
-  const auto config = Command::Config{
+  const auto config = Config{
       // The default pipe is /dev/null to avoid unecessary output.
       // Luckily, we can inherit from stdout that the build script has when run.
       .pipe = Pipe::Inherited(),
   };
 
-  Command::from("echo", "Hello, World!").run(config);
+  cmd("echo", "Hello, World!").run(config);
 }

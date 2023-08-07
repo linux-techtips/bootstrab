@@ -1,15 +1,11 @@
-#define BOOTSTRAB_IMPLEMENTATION
+#define BSTB_IMPL
 #include "../bootstrab.hpp"
 
-using namespace bootstrab;
+using namespace bstb;
 
 auto main(int argc, char **argv) -> int {
-  REBUILD_URSELF(env::Args::from(argc, argv));
+  REBUILD_URSELF(argc, argv);
 
   const auto *msg = "CHANGE THIS MESSAGE AND RERUN!";
-
-  Command::from("echo", msg)
-      .run({
-          .pipe = Pipe::Inherited(),
-      });
+  cmd("echo", msg).run({ .pipe = Pipe::Inherited() });
 }

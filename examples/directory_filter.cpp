@@ -1,15 +1,12 @@
-#define BOOTSTRAB_IMPLEMENTATION
+#define BSTB_IMPL
 #include "../bootstrab.hpp"
 
-using namespace bootstrab;
+using namespace bstb;
 
 auto main() -> int {
-  auto filter = fs::filter("src/", [](const std::fs::path &path) {
-    return path.extension() == ".cpp";
+  auto filter = fs::filter("src/", [](auto&& entry) {
+    return entry.path().extension() == ".cpp";
   });
 
-  Command::from("echo", filter)
-      .run({
-          .pipe = Pipe::Inherited(),
-      });
+  cmd("echo", filter).run({ .pipe = Pipe::Inherited() });
 }

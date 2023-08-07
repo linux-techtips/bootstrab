@@ -1,25 +1,25 @@
-#define BOOTSTRAB_IMPLEMENTATION
+#define BSTB_IMPL
 #include "../bootstrab.hpp"
 
-using namespace bootstrab;
+using namespace bstb;
 
 auto main() -> int {
-  const auto config = Command::Config{
+  const auto config = Config{
       .pipe = Pipe::Inherited(),
   };
 
-  auto sleep_cmd = Command::from("sleep", "3");
+  auto sleep_cmd = cmd("sleep", "3");
 
   sleep_cmd.run({
       .verbose = true,
   });
-  Command::from("echo", "Slept.\nSleeping async!").run(config);
+  cmd("echo", "Slept.\nSleeping async!").run(config);
 
   auto future = sleep_cmd.run_async({
       .verbose = true,
   });
-  Command::from("echo", "Working while sleeping...").run(config);
+  cmd("echo", "Working while sleeping...").run(config);
 
-  future.wait();
-  Command::from("echo", "Slept.").run(config);
+  future.get();
+  cmd("echo", "Slept.").run(config);
 }
