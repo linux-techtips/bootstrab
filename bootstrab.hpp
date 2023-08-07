@@ -2,12 +2,15 @@
 
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
 #include <ranges>
 #include <thread>
 #include <vector>
 #include <span>
 
 extern "C" {
+  #include <sys/mman.h>
+  #include <sys/stat.h>
   #include <sys/wait.h>
   #include <unistd.h>
   #include <fcntl.h>
@@ -34,6 +37,58 @@ namespace {
   };
 
   inline static auto panic = PanicStream::instance();
+
+  struct Map {
+    Fd fd;
+    void* data;
+    size_t size;
+
+    struct Config {
+      int open_mode {};
+      int prot {};
+      size_t size {};
+    };
+      
+    static auto Open(CStr fname, const Config& config) -> Map {
+      const auto fd = open(fname, config.open_mode, 0644);
+      if (fd == -1) {
+        std::cerr << "Failed to open file: " << fname << '\n' << panic;
+      }
+
+      struct stat st;
+      if (fstat(fd, &st) == -1) {
+        close(fd);
+        std::cerr << "Failed to stat file: " << fname << '\n' << panic;
+      }
+
+      const auto size = (config.size) ? config.size : st.st_size;
+
+      auto* data = mmap(nullptr, size, config.prot, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED) {
+        close(fd);
+        std::cerr << "Failed to map file: " << fname << '\n' << panic;
+      }
+
+      return { fd, data, size };
+    }
+
+    static inline auto Read(CStr fname) -> Map {
+      return Map::Open(fname, { O_RDONLY, PROT_READ });
+    }
+
+    static inline auto Write(CStr fname, size_t size) -> Map {
+      return Map::Open(fname, { (O_RDWR | O_CREAT), PROT_WRITE, size });
+    }
+
+    ~Map() {
+      if (data) {
+        munmap(data, size);
+      }
+      if (fd != -1) {
+        close(fd);
+      }
+    }
+  };
 
 } // namespace private
 
@@ -103,8 +158,8 @@ namespace bstb::buffer {
 
   template <size_t Cap>
   struct StackBuffer {
-    size_t buffer_idx = 0;
-    size_t exec_buffer_idx = 0;
+    size_t buffer_idx= 0;
+    size_t exec_buffer_idx= 0;
     std::array<char, Cap> buffer;
     std::array<CStr, Cap/8> exec_buffer;
 
@@ -512,15 +567,21 @@ namespace bstb::compiler::style {
 
 namespace bstb::compiler::c {
 
+  template <buffer::Buffer Buffer>
+  using GCC = style::C<impl::GNU, Buffer>; 
+
   template <buffer::Buffer Buffer = buffer::Default> 
   [[nodiscard]]
-  constexpr auto gcc() -> style::C<impl::GNU, Buffer> {
+  constexpr auto gcc() -> GCC<Buffer> {
     return { "gcc" };
   }
 
+  template <buffer::Buffer Buffer>
+  using Clang = style::C<impl::GNU, Buffer>;
+
   template <buffer::Buffer Buffer = buffer::Default>
   [[nodiscard]]
-  constexpr auto clang() -> style::C<impl::GNU, Buffer> {
+  constexpr auto clang() -> Clang<Buffer> {
     return { "clang" };
   }
 
@@ -528,15 +589,21 @@ namespace bstb::compiler::c {
 
 namespace bstb::compiler::cpp {
 
-  template <buffer::Buffer Buffer = buffer::Default>
-  [[nodiscard]]
-  constexpr auto gcc() -> style::C<impl::GNU, Buffer> {
-    return { "g++" };
-  } 
+  template <buffer::Buffer Buffer>
+  using GCC = style::C<impl::GNU, Buffer>; 
 
   template <buffer::Buffer Buffer = buffer::Default>
   [[nodiscard]]
-  constexpr auto clang() -> style::C<impl::GNU, Buffer> {
+  constexpr auto gcc() -> GCC<Buffer> {
+    return { "g++" };
+  } 
+
+  template <buffer::Buffer Buffer>
+  using Clang = style::C<impl::GNU, Buffer>;
+
+  template <buffer::Buffer Buffer = buffer::Default>
+  [[nodiscard]]
+  constexpr auto clang() -> Clang<Buffer> {
     return { "clang++" };
   }
 
@@ -544,6 +611,7 @@ namespace bstb::compiler::cpp {
 
 namespace bstb::compiler {
   
+
   #if defined(__clang__)
     template <buffer::Buffer Buffer = buffer::Default>
     [[nodiscard]]
@@ -560,7 +628,7 @@ namespace bstb::compiler {
 namespace bstb {
 
   inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
-    const auto* target = args[0]; 
+const auto* target = args[0]; 
 
     if (fs::modified_after(target, input)) {
       return;
@@ -584,6 +652,89 @@ namespace bstb {
   }
 
   #define REBUILD_URSELF(argc, argv) bstb::rebuild(__FILE__, std::span<char*>(argv, static_cast<size_t>(argc)))
+
+  auto embed_into(CStr read_fname, CStr write_fname, size_t row_size = 20) -> void {
+    constexpr static auto embed_header = std::string_view{"#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed header, BSTB_EMBED must be defined in order to include it.\n#else\n"};
+
+    constexpr static auto size_header = std::string_view{"constexpr static unsigned long size = "};
+    constexpr static auto size_footer = std::string_view{";\n"};
+
+    constexpr static auto data_header = std::string_view{"constexpr static unsigned char bytes[] = {\n\t"};
+    constexpr static auto data_footer = std::string_view{"\n};\n#undef BSTB_EMBED\n#endif\n\0"};
+
+    constexpr static auto text_size = (
+      embed_header.size() + size_header.size() + 
+      size_footer.size() + data_header.size() + 
+      data_footer.size()
+    );
+
+    auto read_map = Map::Read(read_fname);
+
+    const auto bytes_for_size = std::log10(read_map.size) - 1;
+    const auto rows = ((read_map.size + row_size - 1) / row_size) * 2;
+    const auto write_size = text_size + (read_map.size * 6) + rows + bytes_for_size;
+
+    auto write_map = Map::Write(write_fname, write_size);
+    if (ftruncate(write_map.fd, write_size) == - 1) {
+      munmap(read_map.data, read_map.size);
+      close(read_map.fd);
+      std::cerr << "Failed to create and size output file: " << write_fname << '\n' << panic;
+    }
+
+    const auto* read_data = static_cast<unsigned char*>(read_map.data);
+    auto* write_data = static_cast<char*>(write_map.data);
+    
+    auto write_bytes = [&write_data](char const* data, size_t size) {
+      std::memcpy(write_data, data, size);
+      write_data += size;
+    };
+
+    auto write_hex = [&write_data, row_size](unsigned char const* data, size_t size) {
+      constexpr static char hex[] = "0123456789ABCDEF";
+      for (size_t i = 0; i < size; ++i) {
+        const auto byte = data[i];
+        *write_data++ = '0';
+        *write_data++ = 'x';
+        *write_data++ = hex[(byte >> 4) & 0xF];
+        *write_data++ = hex[byte & 0xF];
+        *write_data++ = ',';
+        *write_data++ = ' ';
+        if ((i + 1) % row_size == 0 && i != size - 1) {
+          *write_data++ = '\n';
+          *write_data++ = '\t';
+        }
+      }
+
+      if (*(write_data - 2) == ',') {
+        *(write_data - 2) = ' ';
+      }
+    };
+
+    auto write_num = [&write_data](size_t value) {
+      char tmp[21];
+      char* idx = tmp + sizeof(tmp) - 1;
+      *idx = '\0';
+  
+      do {
+        *--idx = '0' + (value % 10);
+        value /= 10;
+      } while (value != 0);
+
+      while (*idx) {
+        *write_data++ = *idx++;
+      }
+    };
+
+    write_bytes(embed_header.data(), embed_header.size());
+      
+    write_bytes(size_header.data(), size_header.size());
+    write_num(read_map.size);
+    write_bytes(size_footer.data(), size_footer.size());
+
+    write_bytes(data_header.data(), data_header.size());
+    write_hex(read_data, read_map.size);
+    write_bytes(data_footer.data(), data_footer.size());
+  }
 
 } // namespace bstb
 
