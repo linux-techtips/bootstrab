@@ -1,510 +1,590 @@
-#ifdef BOOTSTRAB_IMPLEMENTATION  // Comment out if experiencing linter issues
+#ifdef BSTB_IMPL
 
-    #include <filesystem>
-    #include <functional>
-    #include <iostream>
-    #include <vector>
+#include <filesystem>
+#include <iostream>
+#include <ranges>
+#include <thread>
+#include <vector>
+#include <span>
 
-    #ifndef _WIN32  // LINUX INCLUDE
-namespace sys {
-        #include <fcntl.h>
-        #include <sys/wait.h>
-        #include <unistd.h>
-
-constexpr auto* PATH_SEP            = "/";
-static const auto dev_null_fd_read  = open("/dev/null", O_RDONLY);
-static const auto dev_null_fd_write = open("/dev/null", O_WRONLY);
-}  // namespace sys
-
-    #else  // WINDOWS INCLUDE
-namespace sys {
-        #include <process.h>
-        #include <windows.h>
-
-constexpr auto* PATH_SEP = "//";
-}  // namespace sys
-
-    #endif
-
-namespace std {  // I await my seat on the C++ committee.
-namespace fs = filesystem;
+extern "C" {
+  #include <sys/wait.h>
+  #include <unistd.h>
+  #include <fcntl.h>
 }
 
-namespace bootstrab {
+namespace {
+  
+  using CStr = char const*;
+  using Fd = int;
+  using Pid = pid_t;
 
-using CStr = char const*;
-using Fd   = int;
-using Pid  = pid_t;
-
-[[noreturn]] inline auto panic(
-    const CStr message,
-    std::ostream& ostream = std::cerr
-) -> void {
-    ostream << "[PANIC]: " << message << '\n';
-    std::abort();
-}
-
-namespace fs {
-
-    inline auto path_modified_after(const CStr path1, const CStr path2)
-        -> bool {
-        auto path1_write_time = std::fs::file_time_type {};
-        auto path2_write_time = std::fs::file_time_type {};
-
-        try {
-            path1_write_time = std::fs::last_write_time(path1);
-        } catch (std::fs::filesystem_error) {
-            return false;
-        }
-
-        try {
-            path2_write_time = std::fs::last_write_time(path2);
-        } catch (std::fs::filesystem_error) {
-            return true;
-        }
-
-        return path1_write_time > path2_write_time;
+  struct PanicStream {
+    static auto instance() -> PanicStream {
+      static const auto panic_stream = PanicStream{};
+      return panic_stream;
     }
 
-    template<typename T>
-    concept DirectoryIterator = std::is_same_v<
-                                    typename T::value_type,
-                                    std::fs::directory_entry>
-        && !
-    std::is_const_v<T>;
+    [[noreturn]]
+    friend auto operator<<(std::ostream& os, [[maybe_unused]] const PanicStream panic_stream) -> std::ostream& {
+      os.flush();
+      perror("Panic");
+      std::abort();
+    }
+  };
 
-    template<typename T>
-    concept DirectoryPredicate = std::is_invocable_r_v<
-                                     bool,
-                                     std::decay_t<T>,
-                                     std::decay_t<std::fs::directory_entry>>
-        && !
-    std::is_const_v<T>;
+  inline static auto panic = PanicStream::instance();
 
-    template<DirectoryIterator Iter, DirectoryPredicate Pred>
-    struct DirectoryFilterIterator {  // I hate C++ iterators
-        using iterator_category = typename std::input_iterator_tag;
-        using value_type        = typename Iter::value_type;
-        using difference_type   = typename Iter::difference_type;
-        using pointer           = typename Iter::pointer;
-        using reference         = typename Iter::reference;
-        using const_reference   = const typename Iter::reference;
-        using const_pointer     = const typename Iter::pointer;
+} // namespace private
 
-        Iter curr;
-        Iter last {};
-        Pred pred;
+namespace bstb::buffer {
 
-        explicit DirectoryFilterIterator(Iter& it, Pred&& predicate) :
-            curr {it},
-            pred {predicate} {
-            this->next();
-        }
+  template <typename T>
+  concept Buffer = requires(T buf, const T buf_const, T& buf_ref, std::string_view sv, std::ostream& os) {
+    { std::is_trivially_constructible_v<T> };
+    { std::is_trivially_destructible_v<T> };
+    { std::is_trivially_copyable_v<T> };
 
-        DirectoryFilterIterator() = default;
+    { buf.exec_args() } -> std::same_as<char* const*>;
+    { buf.size() } -> std::same_as<size_t>;
+    { buf.push(sv, sv) } -> std::same_as<void>;
+    { buf[std::size_t{}] } -> std::same_as<CStr>;
+    { buf_const[std::size_t{}] } -> std::same_as<CStr>;
+    { os << buf_ref } -> std::same_as<std::ostream&>;
+  };
 
-        auto operator++() -> DirectoryFilterIterator& {
-            ++curr;
-            this->next();
-            return *this;
-        }
+  struct HeapBuffer {
+    std::vector<std::string> buffer;
+    std::vector<CStr> exec_buffer;
 
-        auto operator++(int) -> DirectoryFilterIterator& {
-            auto res = *this;
-            ++curr;
-            this->next();
-            return *this;
-        }
+    [[nodiscard]]
+    auto exec_args() -> char* const* {
+      exec_buffer.clear();
+      exec_buffer.reserve(buffer.size() + 1);
 
-        auto operator*() const -> const_reference {
-            return *curr;
-        }
+      for (const auto& str : buffer) {
+        exec_buffer.push_back(&str[0]);
+      }
+      exec_buffer.push_back(nullptr);
 
-        auto operator->() const -> const_pointer {
-            return &(*curr);
-        }
-
-        friend auto operator==(
-            const DirectoryFilterIterator& lhs,
-            const DirectoryFilterIterator& rhs
-        ) -> bool {
-            return lhs.curr == rhs.curr;
-        }
-
-        friend auto operator!=(
-            const DirectoryFilterIterator& lhs,
-            const DirectoryFilterIterator& rhs
-        ) -> bool {
-            return !(lhs == rhs);
-        }
-
-        auto next() -> void {
-            for (; curr != last && !std::invoke(pred, *curr); ++curr) {
-            }
-        }
-    };
-
-    template<DirectoryIterator Iter, DirectoryPredicate Pred>
-    struct DirectoryFilter {
-        using value_type = typename Iter::
-            value_type;  // Not standard, but for compatibility.
-
-        using iterator       = DirectoryFilterIterator<Iter, Pred>;
-        using const_iterator = DirectoryFilterIterator<Iter, Pred>;
-
-        Iter curr;
-        Pred pred;
-
-        auto begin() -> iterator {
-            return iterator(curr, std::forward<Pred>(pred));
-        }
-
-        auto end() -> iterator {
-            return iterator();
-        }
-
-        auto cbegin() const -> const_iterator {
-            return const_iterator(curr, std::forward<Pred>(pred));
-        }
-
-        auto cend() const -> const_iterator {
-            return const_iterator();
-        }
-    };
-
-    template<DirectoryIterator Iter, DirectoryPredicate Pred>
-    inline auto filter(const Iter& it, Pred&& predicate)
-        -> DirectoryFilter<Iter, Pred> {
-        return {it, std::forward<Pred>(predicate)};
+      return const_cast<char* const*>(exec_buffer.data());
     }
 
-    template<DirectoryPredicate Pred>
-    inline auto filter(const std::fs::path& path, Pred&& predicate)
-        -> DirectoryFilter<std::filesystem::directory_iterator, Pred> {
-        return {
-            std::filesystem::directory_iterator(path),
-            std::forward<Pred>(predicate)};
+    [[nodiscard]]
+    constexpr auto size() -> size_t {
+      return buffer.size();
     }
 
-    template<DirectoryPredicate Pred>
-    inline auto filter(const CStr path, Pred&& predicate)
-        -> DirectoryFilter<std::filesystem::directory_iterator, Pred> {
-        return {
-            std::filesystem::directory_iterator(std::fs::path(path)),
-            std::forward<Pred>(predicate)};
+    template <typename... Args>
+    auto push(Args&&... args) -> void {
+      if constexpr (sizeof...(Args) == 1) {
+        buffer.emplace_back(std::forward<Args>(args)...);
+      } else {
+        const auto str = (std::string{} += ... += args);
+        buffer.push_back(std::move(str));
+      }
     }
 
-}  // namespace fs
+    constexpr auto operator[](size_t idx) -> CStr {
+      return buffer[idx].c_str();
+    }
 
-namespace env {
+    constexpr auto operator[](size_t idx) const -> CStr {
+      return buffer[idx].c_str();
+    }
+    
+    friend auto operator<<(std::ostream& os, HeapBuffer& buffer) -> std::ostream& {
+      for (const auto& str : buffer.buffer) {
+        os << str << ' ';
+      }
+      return os;
+    }
+  };
 
-    #if defined(__clang__)
-    static constexpr auto* PARENT_COMPILER = "clang++";
-    #elif defined(__GNUC__) || defined(__GNUG__)
-    static constexpr auto* PARENT_COMPILER = "g++";
-    #elif defined(_MSC_VER)
-    // TODO (Makoto) Make sure this is correct.
-    static constexpr auto* PARENT_COMPILER = "cl.exe";
-    #elif defined(__MINGW32__) || defined(__MINGW64__)
-    // TODO (Makoto) Make sure this is correct.
-    static constexpr auto* PARENT_COMPILER = "g++";
-    #endif
+  template <size_t Cap>
+  struct StackBuffer {
+    size_t buffer_idx = 0;
+    size_t exec_buffer_idx = 0;
+    std::array<char, Cap> buffer;
+    std::array<CStr, Cap/8> exec_buffer;
 
-    struct Args: public std::vector<CStr> {
-        static auto from(const int argc, char** argv) -> Args {
-            return {std::vector<CStr>(argv, argv + argc)};
-        }
-    };
+    [[nodiscard]]
+    constexpr auto exec_args() -> char* const* {
+      exec_buffer[exec_buffer_idx] = nullptr;
+      return const_cast<char* const*>(exec_buffer.data());
+    }
 
-}  // namespace env
+    [[nodiscard]]
+    constexpr auto size() const -> size_t {
+      return buffer_idx;
+    }
 
-struct Pipe {
+    template <typename... Args>
+    constexpr auto push(Args&&... args) -> void {
+      exec_buffer[exec_buffer_idx++] = &buffer[buffer_idx];
+
+      auto push_every = [this] (std::string_view str) {
+        std::copy(str.begin(), str.end(), &buffer[buffer_idx]);
+        buffer_idx += str.size(); 
+      };
+
+      (push_every(std::forward<Args>(args)), ...);    
+      buffer[buffer_idx++] = '\0';
+    }
+
+    constexpr auto operator[](size_t idx) -> CStr {
+      return buffer[idx];
+    }
+
+    constexpr auto operator[](size_t idx) const -> CStr {
+      return buffer[idx];
+    }
+
+    friend auto operator<<(std::ostream& os, StackBuffer& buffer) -> std::ostream& {
+      const auto* exec_args = buffer.exec_args();
+      for (size_t i = 0; i < buffer.exec_buffer_idx; ++i) {
+        os << exec_args[i] << ' ';
+      }
+      return os;
+    }
+  };
+
+  #ifndef BSTB_DEFAULT_BUFFER
+  #define BSTB_DEFAULT_BUFFER HeapBuffer
+  #endif
+  using Default = BSTB_DEFAULT_BUFFER;
+
+} // namespace bstb::buffer
+
+namespace bstb::fs {
+
+  using Path = std::filesystem::path;
+  using Entry = std::filesystem::directory_entry;
+
+  [[nodiscard]]
+  inline auto modified_after(const Path& path1, const Path& path2) -> bool {
+    return std::filesystem::last_write_time(path1) > std::filesystem::last_write_time(path2);
+  }
+
+  namespace {
+    
+    template <typename T>
+    auto iter_impl(const Path& path) -> decltype(auto) {
+      return T{ path };
+    }
+
+    template <typename T, typename Fn>
+    auto filter_impl(const Path& path, Fn&& filter) -> decltype(auto) {
+      return T{ path }
+        | std::views::filter(std::forward<Fn>(filter))
+        | std::views::transform([](auto&& entry) { return entry; });
+    }
+
+  } // namespace private 
+
+  inline auto iter(const Path& path) -> decltype(auto) {
+    return iter_impl<std::filesystem::directory_iterator>(path);
+  }
+
+  inline auto recursive_iter(const Path& path) -> decltype(auto) {
+    return iter_impl<std::filesystem::recursive_directory_iterator>(path);
+  }
+
+  template <typename Fn>
+  inline auto filter(const Path& path, Fn&& filter) -> decltype(auto) {
+    return filter_impl<std::filesystem::directory_iterator, Fn>(path, std::forward<Fn>(filter));
+  }
+ 
+  template <typename Fn>
+  inline auto recursive_filter(const Path& path, Fn&& filter) -> decltype(auto) {
+    return filter_impl<std::filesystem::recursive_directory_iterator, Fn>(path, std::forward<Fn>(filter));
+  }
+
+
+} // namespace bstb::fs
+
+namespace bstb {
+
+  template <typename T, typename U>
+  concept IterableOver = requires(T container) {
+    { *std::begin(container) } -> std::convertible_to<U>;
+    { *std::end(container) } -> std::convertible_to<U>;
+  };
+
+  struct Pipe {
     Fd read;
     Fd write;
 
-    #ifndef _WIN32
-    static auto Inherited() -> Pipe {
-        return {STDIN_FILENO, STDOUT_FILENO};
+    [[nodiscard]]
+    constexpr static auto Inherited() -> Pipe {
+      return { STDIN_FILENO, STDOUT_FILENO };
     }
 
-    #else  // TODO: (Makoto) Make work on windows
-    static auto Inherited() -> Pipe {
-        panic("haha imagine using windows");
-    }
-    #endif
-
-    #ifndef _WIN32
+    [[nodiscard]]
     static auto Owned(Fd read, Fd write) -> Pipe {
-        Fd pipefd[2];  // NOLINT
-        pipefd[0] = read;
-        pipefd[1] = write;
+      return { read, write };
+   }
 
-        if (sys::pipe(pipefd) != 0) {
-            panic("Failed to create pipe.");
-        }
+    [[nodiscard]]
+    static auto Null() -> Pipe { // TODO: (Carter) static vars in function are not free.
+      static auto read = open("/dev/null", O_RDONLY);
+      static auto write = open("/dev/null", O_WRONLY);
 
-        return {pipefd[0], pipefd[1]};
+      return { read, write };
     }
+  };
 
-    #else  // TODO: (Makoto) Make work on windows
-    static auto Owned(Fd read, Fd write) -> Pipe {
-        panic("lol michaelsoft binbows");
-    }
-    #endif
-
-    #ifndef _WIN32
-    static auto Null() -> Pipe {
-        // if you can't open /dev/null, you have bigger issues than an error on your build script
-        return {sys::dev_null_fd_read, sys::dev_null_fd_write};
-    }
-
-    #else  // TODO: (Makoto) Make work on windows
-    static auto Null() -> Pipe {
-        panic("noooo windows nooooooo");
-    }
-    #endif
-
-    auto deinit() -> void {
-        sys::close(read);
-        sys::close(write);
-    }
-};
-
-template<typename T>  // Why did my linter do this?
-concept IterableToString = requires(T it) {
-                               {
-                                   std::begin(it)
-                                   } -> std::input_or_output_iterator;
-                               {
-                                   std::end(it)
-                                   } -> std::input_or_output_iterator;
-                               std::is_convertible_v<decltype(*std::begin(it)), T>;
-                           };
-
-struct Command {
-    // TODO: (Carter) This is inefficient, but a necessary evil for iterating over directories. Optimize later
-    using Argv   = std::vector<std::string>;
+  struct Future {
     using Status = int;
 
-    Argv args;
+    Pid pid;
 
-    struct Future {
-        Pid pid;
+    static auto wait(Pid pid) -> Status {
+      auto status = Status{};
+      waitpid(pid, &status, 0);
 
-        constexpr static auto from(Pid pid) -> Future {
-            return {pid};
-        }
+      if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+      }
 
-        auto wait() const -> void {
-            Command::process_wait(pid);
-        }
-
-        [[nodiscard]] auto get() const -> Status {
-            return Command::process_wait(pid);
-        }
-    };
-
-    struct Config {
-        Pipe pipe {Pipe::Null()};
-        bool verbose {false};
-
-        ~Config() {
-            pipe.deinit();
-        }
-    };
-
-    template<typename... Args>
-    static auto from(Args&&... args) -> Command {
-        auto res = Argv {};
-        res.reserve(sizeof...(Args) + 1);
-
-        (Command::from_base_case(res, std::forward<Args>(args)), ...);
-
-        return {std::move(res)};
+      std::cerr << "Process did not execute properly. Status: " << status << '\n' << panic;
     }
 
-    // Don't ask me why
-    static auto from_base_case(Argv& args, std::string&& arg) -> void {
-        args.push_back(std::forward<std::string>(arg));
+    auto get() const -> Status {
+      return Future::wait(pid);
     }
 
-    static auto from_base_case(Argv& args, std::string& arg) -> void {
-        args.push_back(arg);
+    [[nodiscard]]
+    auto completed() const -> bool {
+      Status status;
+      return waitpid(pid, &status, WNOHANG) != 0;
     }
+  };
 
-    static auto from_base_case(Argv& args, const std::string& arg) -> void {
-        args.push_back(arg);
+  struct TaskList {
+    std::vector<Future> tasks;
+
+    auto push(Future future) -> void {
+      tasks.push_back(future);
     }
-
-    template<IterableToString T>
-    static auto from_base_case(Argv& args, T& it) -> void {
-        for (const auto& entry : it) {
-            args.push_back(entry);
-        }
-    }
-
-    template<fs::DirectoryIterator Iter, fs::DirectoryPredicate Pred>
-    static auto from_base_case(Argv& args, fs::DirectoryFilter<Iter, Pred>& it)
-        -> void {
-        for (const auto& entry : it) {
-            args.push_back(entry.path().string());
-        }
-    }
-
-    #ifndef _WIN32
-    static auto process_wait(Pid pid) -> Status {
-        auto status = 0;
-        sys::waitpid(pid, &status, 0);
-
-        if (WIFEXITED(status)) {
-            return WEXITSTATUS(status);
-        }
-
-        panic("Process did not execute properly.");
-    }
-
-    #else  // TODO: (Makoto) Make work on windows
-    static auto process_wait(Pid pid) -> Status {
-        panic("I bet windows does processes really weird");
-    }
-    #endif
-
-    #ifndef _WIN32
-    auto exec(const Config& config) -> Pid {
-        if (config.verbose) {
-            std::cerr << "[INFO]: " << *this << '\n';
-        }
-
-        auto child_pid = sys::fork();
-        if (child_pid < 0) {
-            panic("Failed to fork process.");
-        }
-
-        if (child_pid == 0) {
-            const auto& fd_read  = config.pipe.read;
-            const auto& fd_write = config.pipe.write;
-
-            if (fd_read != STDIN_FILENO) {
-                sys::dup2(fd_read, STDIN_FILENO);
-            }
-
-            // git will not like you if you try to pipe to /dev/null
-            if (fd_write != STDOUT_FILENO) {
-                sys::dup2(fd_write, STDOUT_FILENO);
-            }
-
-            const auto& argv = this->c_str_args();
-            if (sys::execvp(argv.front(), const_cast<char* const*>(argv.data()))
-                != 0) {
-                panic("Task exited abnormally.");
-            }
-        }
-
-        return child_pid;
-    }
-
-    #else  // TODO: (Makoto) Make work on windows
-    auto exec(const Config& config) -> Pid {
-        panic("Good luck on this one");
-    }
-    #endif
-
-    [[nodiscard]] auto c_str_args() const -> std::vector<CStr> {
-        auto cstr_args = std::vector<CStr> {};
-        cstr_args.reserve(args.size() + 1);
-
-        for (const auto& arg : args) {
-            cstr_args.emplace_back(arg.data());
-        }
-        cstr_args.emplace_back(nullptr);
-
-        return cstr_args;
-    }
-
-    auto run(const Config& config) -> Status {
-        const auto child_pid = Command::exec(config);
-        return Command::process_wait(child_pid);
-    }
-
-    auto run_async(const Config& config) -> Future {
-        const auto child_pid = Command::exec(config);
-        return Future::from(child_pid);
-    }
-
-    auto arg(CStr arg) -> Command& {
-        args.push_back(arg);
-        return *this;
-    }
-
-    auto concat(const Command& cmd) -> Command& {
-        args.insert(args.cend(), cmd.args.cbegin(), cmd.args.cend());
-        return *this;
-    }
-
-    friend auto operator<<(std::ostream& ostream, const Command& cmd)
-        -> std::ostream& {
-        const auto& argv = cmd.args;
-        const auto end   = argv.cend() - 1;
-
-        for (auto it = argv.cbegin(); it != argv.cend(); ++it) {
-            ostream << *it;
-            if (it != end) {
-                ostream << ' ';
-            }
-        }
-
-        return ostream;
-    }
-};
-
-// TODO: (Carter) Make TaskLists lazy and non-inherited.
-struct TaskList: public std::vector<Command::Future> {
-    using std::vector<Command::Future>::vector;
 
     auto wait() -> void {
-        for (auto& task : *this) {
-            task.wait();
+      using namespace std::chrono_literals;
+
+      while (!tasks.empty()) {
+        auto it = tasks.begin();
+        while (it != tasks.end()) {
+          if (it->completed()) {
+            it = tasks.erase(it);
+          } else {
+            ++it;
+          }
         }
+        std::this_thread::sleep_for(10ms);
+      }
     }
 
-    auto get() -> std::vector<Command::Status> {
-        auto res = std::vector<Command::Status> {};
-        for (auto& task : *this) {
-            res.push_back(task.get());
+  };
+
+  struct Config {
+    Pipe pipe = Pipe::Null();
+    bool verbose {};
+  };
+
+  template <buffer::Buffer Buffer>
+  struct Command {
+    Buffer buffer;
+
+    template <typename... Args>
+    auto arg(Args&&... args) -> void {
+      buffer.push(std::forward<Args>(args)...);
+    }
+
+    template <typename Path>
+    auto arg(Path&& path) -> void requires (
+      std::same_as<std::remove_cvref_t<Path>, fs::Path> ||
+      std::same_as<std::remove_cvref_t<Path>, fs::Entry>
+    ) {
+      buffer.push(path.string());
+    }
+
+    template <typename Iter>
+    requires IterableOver<Iter, std::string_view>
+    auto arg(Iter&& iter) -> void {
+      for (auto&& arg : iter) {
+        buffer.push(std::forward<std::decay_t<decltype(arg)>>(arg));
+      }
+    }
+
+    template <typename Iter>
+    requires IterableOver<Iter, fs::Entry>
+    auto arg(Iter&& iter) -> void {
+      for (auto&& entry : iter) {
+        buffer.push(entry.path().string());
+      }
+    }
+
+    auto exec(const Config& config) -> Pid {
+      if (config.verbose) {
+        std::cout << buffer << std::endl;
+      }
+
+      const auto child = fork();
+      if (child < 0) {
+        std::cerr << "Failed to fork process with error: " << child << '\n' << panic;
+      
+      } else if (child == 0) {
+
+        const auto read = config.pipe.read;
+        const auto write = config.pipe.write;
+
+        if (read != STDIN_FILENO) {
+          dup2(read, STDIN_FILENO);
         }
-        return res;
+
+        if (write != STDOUT_FILENO) {
+          dup2(write, STDOUT_FILENO);
+        }
+
+        const auto* exec_args = buffer.exec_args();
+        if (const auto err = execvp(exec_args[0], exec_args)) {
+          std::cerr << "Task exited abnormally: " << err << '\n' << panic;
+        }
+
+      }
+
+      return child;
     }
-};
 
-    #define REBUILD_URSELF(args) rebuild_urself(__FILE__, (args))  // NOLINT
-
-constexpr inline auto rebuild_urself(const CStr source, const env::Args& args)
-    -> void {
-    const auto* target = args[0];
-    if (!fs::path_modified_after(source, target)) {
-        return;
+    auto run(const Config& config) -> Future::Status {
+      return Future::wait(Command::exec(config));
     }
 
-    std::cout << "Change detected, rebuilding...\n";
+    [[nodiscard]]
+    auto run_async(const Config& config) -> Future {
+      return Future { Command::exec(config) };
+    }
 
-    #if defined(_MSC_VER)  // TODO: (Makoto) Make sure this is correct
-    Command::from(
-        env::PARENT_COMPILER,
-        "/EHsc",
-        "/std:c++20",
-        source,
-        std::string {"/Fe:"} + target
-    )
-        .run({});
-    #else
-    Command::from(env::PARENT_COMPILER, "-std=c++20", source, "-o", target)
-        .run({});
-    #endif
-    Command::from(target, args).run({.pipe = Pipe::Inherited()});
+    friend auto operator<<(std::ostream& os, Command& cmd) -> std::ostream& {
+      return os << cmd.buffer;
+    }
 
-    std::exit(0);  // NOLINT
+  };
+
+  template <buffer::Buffer Buffer = buffer::Default, typename... Args>
+  [[nodiscard]]
+  inline auto cmd(Args&&... args) -> Command<Buffer> {
+    auto command = Command<Buffer> { Buffer{} }; 
+    (command.arg(std::forward<Args>(args)), ...);
+    return command;
+  }
+
+  template <size_t Cap, typename... Args>
+  [[nodiscard]]
+  inline auto cmd(Args&&... args) -> Command<buffer::StackBuffer<Cap>> {
+    return cmd<buffer::StackBuffer<Cap>>(std::forward<Args>(args)...);
+  }
+
+} // namespace bstb
+
+namespace bstb::compiler::impl {
+
+  template <buffer::Buffer Buffer>
+  struct GNU {
+    using Command = Command<Buffer>;
+
+    constexpr static auto arg(Command& cmd, std::string_view str) -> void {
+      cmd.arg(str);
+    }
+
+    constexpr static auto input(Command& cmd, std::string_view str) -> void {
+      cmd.arg(str);
+    }
+
+    constexpr static auto output(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-o");
+      cmd.arg(str);
+    }
+
+    constexpr static auto version(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-std=", str);
+    }
+
+    constexpr static auto warn(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-W", str);
+    }
+
+    constexpr static auto include(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-I", str);
+    }
+
+    constexpr static auto opt(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-O", str);
+    }
+
+    constexpr static auto no_exe(Command& cmd) -> void {
+      cmd.arg("-c");
+    }
+
+    constexpr static auto feature(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-f", str);
+    }
+
+    constexpr static auto arch(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-m", str);
+    }
+  };
+
 }
 
-}  // namespace bootstrab
+namespace bstb::compiler::style {
+
+  template <template <typename> typename T, buffer::Buffer Buffer>
+  struct C {
+    using Impl = T<Buffer>; 
+    
+    Command<Buffer> cmd;
+
+    constexpr C(std::string_view name) {
+      cmd.arg(name);
+    }
+
+    constexpr auto arg(std::string_view str) -> C& {
+      Impl::arg(cmd, str);
+      return *this;
+    }
+
+    constexpr auto input(std::string_view str) -> C& {
+      Impl::input(cmd, str);
+      return *this;
+    }
+
+    constexpr auto output(std::string_view str) -> C& {
+      Impl::output(cmd, str);
+      return *this;
+    }
+
+    constexpr auto version(std::string_view str) -> C& {
+      Impl::version(cmd, str);
+      return *this;
+    }
+
+    constexpr auto warn(std::string_view str) -> C& {
+      Impl::warn(cmd, str);
+      return *this;
+    }
+
+    constexpr auto include(std::string_view str) -> C& {
+      Impl::include(cmd, str);
+      return *this;
+    }
+
+    constexpr auto opt(std::string_view str) -> C& {
+      Impl::opt(cmd, str);
+      return *this;
+    }
+
+    constexpr auto no_exe(std::string_view str) -> C& {
+      Impl::no_exe(cmd, str);
+      return *this;
+    }
+
+    constexpr auto feature(std::string_view str) -> C& {
+      Impl::feature(cmd, str);
+      return *this;
+    }
+
+    constexpr auto arch(std::string_view str) -> C& {
+      Impl::arch(cmd, str);
+      return *this;
+    }
+    
+    constexpr auto compile(const Config& config) -> Future::Status {
+      return cmd.run(config);
+    }
+
+    constexpr auto compile_async(const Config& config) -> Future {
+      return cmd.run_async(config);
+    }
+  };
+
+} // namespace bstb::compiler::impl
+
+namespace bstb::compiler::c {
+
+  template <buffer::Buffer Buffer = buffer::Default> 
+  [[nodiscard]]
+  constexpr auto gcc() -> style::C<impl::GNU, Buffer> {
+    return { "gcc" };
+  }
+
+  template <buffer::Buffer Buffer = buffer::Default>
+  [[nodiscard]]
+  constexpr auto clang() -> style::C<impl::GNU, Buffer> {
+    return { "clang" };
+  }
+
+} // namespace bstb::compiler::c
+
+namespace bstb::compiler::cpp {
+
+  template <buffer::Buffer Buffer = buffer::Default>
+  [[nodiscard]]
+  constexpr auto gcc() -> style::C<impl::GNU, Buffer> {
+    return { "g++" };
+  } 
+
+  template <buffer::Buffer Buffer = buffer::Default>
+  [[nodiscard]]
+  constexpr auto clang() -> style::C<impl::GNU, Buffer> {
+    return { "clang++" };
+  }
+
+} // namespace bstb::compiler::cpp
+
+namespace bstb::compiler {
+  
+  #if defined(__clang__)
+    template <buffer::Buffer Buffer = buffer::Default>
+    [[nodiscard]]
+    constexpr auto native() -> decltype(auto) { return cpp::clang<Buffer>(); }
+  #elif defined(__GNUC__) || defined(__GNUG__) || defined(__MINGW32__) || defined(__MINGW64__)
+    template <buffer::Buffer Buffer = buffer::Default>
+    [[nodiscard]]
+    constexpr auto native() -> decltype(auto) { return cpp::gcc<Buffer>(); }
+    
+  #endif
+
+} // namespace bstb::compiler
+
+namespace bstb {
+
+  inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
+    const auto* target = args[0]; 
+
+    if (fs::modified_after(target, input)) {
+      return;
+    }
+
+    std::cout << "Change detected. Rebuilding...\n";
+
+    const auto status = compiler::native<buffer::StackBuffer<100>>()
+      .version("c++20")
+      .input(input)
+      .output(target)
+      .compile({});
+
+    if (status) {
+      std::cerr << "Failed to rebuild urself :(\n" << panic;
+    }
+
+    cmd(args).run({ .pipe = Pipe::Inherited() });
+
+    std::exit(0);
+  }
+
+  #define REBUILD_URSELF(argc, argv) bstb::rebuild(__FILE__, std::span<char*>(argv, static_cast<size_t>(argc)))
+
+} // namespace bstb
 
 #endif

@@ -24,17 +24,17 @@ entire project can have access to bootstrab's features.
 Here's a quick "Hello World" example in bootstrab:
 
 ```cpp
-#define BOOTSTRAB_IMPLEMENTATION
+#define BSTB_IMPL 
 #include "bootstrab.hpp"
 
-using namespace bootstrab;
+using namespace bstb;
 
 auto main() -> int {
-    const auto config = Command::Config {
+    const auto config = Config {
         .pipe = Pipe::Inherited(),
     };
 
-    Command::from("echo", "Hello World!").run(config);
+    cmd("echo", "Hello World!").run(config);
 }
 
 ```
@@ -45,6 +45,7 @@ For more usage information, check out [examples](examples).
 
 - Asynchronous Execution: Commands can be queued to run in parallel and awaited at a later time.
 - Command Pooling: Multiple commands can be run in parallel and awaited at once.
+- Buffers: A concept interface is provided that can allow the allocation of command arguments to your own memory pools.
 - Directory Filters: Filters can be applied to files and directories to create behavior based off of file or directorie's attributes
 - REBUILD_URSELF: Inspired by Tsoding's [nobuild](https://github.com/tsoding/nobuild) REBUILD_URSELF can detect changes in the build script and rebuild itself as needed so you can compile once and run forever.
 
@@ -52,10 +53,9 @@ For more usage information, check out [examples](examples).
 
 - [ ] File Embedding
 - [ ] Environment Integration
-- [ ] Multi-threading rework
-- [ ] Compile-Time code generation
+- [X] Multi-threading rework
 - [ ] Hot Code Reloading
-- [ ] Conditional Recompilation
 - [ ] Git Integration
 - [ ] Windows support (LOL)
-- [ ] Optimizsationsz
+- [X] BYOB (Bring Your Own Buffers)
+- [X] Optimizsationsz
