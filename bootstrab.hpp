@@ -1,96 +1,335 @@
-#ifdef BSTB_IMPL
+#if defined(BSTB_IMPL) || defined(BSTB_RT)
 
-#include <filesystem>
-#include <iostream>
-#include <iomanip>
-#include <ranges>
-#include <thread>
-#include <vector>
-#include <span>
+#include <utility>
+
+#if defined(_WIN32) || defined(_WIN64)
+
+#error Michaelsoft Binbows is mean, all the functions are different plz help 
+#define system windows
+
+namespace sys::windows {} // namespace sys::windows
+
+#elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+
+#define system linux
 
 extern "C" {
+  #include <sys/types.h>
   #include <sys/mman.h>
   #include <sys/stat.h>
   #include <sys/wait.h>
   #include <unistd.h>
   #include <fcntl.h>
+  #include <dlfcn.h>
+  #include <spawn.h>
 }
 
-namespace {
-  
-  using CStr = char const*;
-  using Fd = int;
-  using Pid = pid_t;
+using CStr = char const*;
 
-  struct PanicStream {
-    static auto instance() -> PanicStream {
-      static const auto panic_stream = PanicStream{};
-      return panic_stream;
+namespace sys::linux { 
+
+  using Env = char* const*;
+
+  extern "C" Env environ;
+
+  namespace io {
+
+    using Fd = int;
+
+    constexpr static Fd STDIN = STDIN_FILENO;
+    constexpr static Fd STDOUT = STDOUT_FILENO;
+    constexpr static Fd STDERR = STDERR_FILENO;
+    constexpr static CStr NULL_PATH = "/dev/null";
+    constexpr static int FAILED = -1;
+
+    inline auto open_fd_read(CStr path) -> Fd {
+      return open(path, O_RDONLY, 0644);
     }
 
-    [[noreturn]]
-    friend auto operator<<(std::ostream& os, [[maybe_unused]] const PanicStream panic_stream) -> std::ostream& {
-      os.flush();
-      perror("Panic");
-      std::abort();
+    inline auto open_fd_write(CStr path) -> Fd {
+      return open(path, O_WRONLY | O_CREAT | S_IRUSR, 0664);
     }
-  };
 
-  inline static auto panic = PanicStream::instance();
-
-  struct Map {
-    Fd fd;
-    void* data;
-    size_t size;
-
-    struct Config {
-      int open_mode {};
-      int prot {};
-      size_t size {};
-    };
-      
-    static auto Open(CStr fname, const Config& config) -> Map {
-      const auto fd = open(fname, config.open_mode, 0644);
-      if (fd == -1) {
-        std::cerr << "Failed to open file: " << fname << '\n' << panic;
-      }
-
+    inline auto get_fd_size(Fd fd) -> size_t {
       struct stat st;
-      if (fstat(fd, &st) == -1) {
-        close(fd);
-        std::cerr << "Failed to stat file: " << fname << '\n' << panic;
-      }
+      fstat(fd, &st);
+      return st.st_size;
+    }
 
-      const auto size = (config.size) ? config.size : st.st_size;
+    inline auto fd_truncate(Fd fd, size_t size) -> int {
+      return ftruncate(fd, size);
+    }
 
-      auto* data = mmap(nullptr, size, config.prot, MAP_SHARED, fd, 0);
+    inline auto map_fd_read(Fd fd, size_t size) -> void* {
+      auto* data = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0); 
       if (data == MAP_FAILED) {
-        close(fd);
-        std::cerr << "Failed to map file: " << fname << '\n' << panic;
+        return nullptr;
       }
-
-      return { fd, data, size };
+      return data;
     }
 
-    static inline auto Read(CStr fname) -> Map {
-      return Map::Open(fname, { O_RDONLY, PROT_READ });
+    inline auto map_fd_write(Fd fd, size_t size) -> void* {
+      auto* data = mmap(NULL, size, PROT_WRITE, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED) {
+        return nullptr;
+      }
+      return data;
     }
 
-    static inline auto Write(CStr fname, size_t size) -> Map {
-      return Map::Open(fname, { (O_RDWR | O_CREAT), PROT_WRITE, size });
+  } // namespace io
+
+  namespace process {
+
+    using Pid = pid_t;
+    using Status = int;
+    
+    constexpr static int FAILED = -1;
+
+    inline auto exec(io::Fd read, io::Fd write, CStr arg, char* const* args) -> Pid {
+      posix_spawn_file_actions_t file_actions;
+      posix_spawnattr_t attr;
+
+      Pid pid;
+      Status status;
+
+      if (posix_spawn_file_actions_init(&file_actions) != 0) {
+        return FAILED;
+      }
+
+      if (read != io::STDIN) {
+        posix_spawn_file_actions_adddup2(&file_actions, read, io::STDIN);
+      }
+
+      if (write != io::STDIN) {
+        posix_spawn_file_actions_adddup2(&file_actions, write, io::STDIN);
+      }
+
+      posix_spawnattr_init(&attr);
+
+      status = posix_spawnp(&pid, arg, &file_actions, &attr, args, environ);
+
+      posix_spawn_file_actions_destroy(&file_actions);
+      posix_spawnattr_destroy(&attr);
+
+      if (status != 0) {
+        return FAILED;
+      }
+
+      return pid;
     }
 
-    ~Map() {
-      if (data) {
-        munmap(data, size);
+    inline auto wait(Pid pid) -> Status {
+      auto status = Status{};
+      waitpid(pid, &status, 0);
+
+      if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
       }
-      if (fd != -1) {
-        close(fd);
-      }
+
+      return FAILED;
+    }
+
+    inline auto completed(Pid pid) -> bool {
+      auto status = Status{};
+      return waitpid(pid, &status, WNOHANG) != 0;
+    }
+
+  } // namespace process
+
+  namespace dylib {
+
+    using Handle = void*;
+
+    enum {
+      Now = RTLD_NOW,
+      Lazy = RTLD_LAZY,
+      Global = RTLD_GLOBAL,
+      Local = RTLD_LOCAL,
+      NoLoad = RTLD_NOLOAD,
+      NoDelete = RTLD_NODELETE,
+      First = RTLD_FIRST,
+    };
+
+    inline auto open(CStr path, int mode) -> Handle {
+      return dlopen(path, mode);
+    }
+
+    inline auto sym(Handle handle, CStr symbol) -> Handle {
+      return dlsym(handle, symbol);
+    }
+
+    inline auto err() -> CStr {
+      return dlerror();
+    }
+
+    inline auto close(Handle handle) -> int {
+      return dlclose(handle);
+    }
+
+  } // namespace dylib
+
+} // sys::linux
+
+#else // system
+
+#error Unsupported System for bootstrab implementation
+
+#endif // system
+
+namespace sys {
+
+  using Env = system::Env;
+  inline Env environ = system::environ;
+
+  namespace io = system::io;
+  namespace process = system::process;
+  namespace dylib = system::dylib; 
+
+} // namespace sys
+
+namespace bstb {
+  
+  struct Err {
+    CStr msg {};
+
+    inline auto why() const -> CStr {
+      return msg;
+    }
+
+    inline operator bool() const {
+      return msg;
     }
   };
 
-} // namespace private
+  template <typename T>
+  struct Result {
+    T ok;
+    Err err {};
+ 
+    inline operator bool () const {
+      return err;
+    }
+  };
+
+  struct Pipe {
+    sys::io::Fd read;
+    sys::io::Fd write;
+
+    static inline auto Inherited() -> Pipe {
+      return { sys::io::STDIN, sys::io::STDOUT };
+    }
+
+    static inline auto Owned(sys::io::Fd read, sys::io::Fd write) -> Pipe {
+      return { read, write };
+    }
+
+    static inline auto Null() -> Pipe {
+      static auto read = sys::io::open_fd_read(sys::io::NULL_PATH);
+      static auto write = sys::io::open_fd_write(sys::io::NULL_PATH);
+      return { read, write };
+    }
+  };
+
+  struct Dylib {
+    sys::dylib::Handle handle;
+    CStr path;
+
+    static inline auto Open(CStr path, int mode = sys::dylib::Now) -> Result<Dylib> {
+      auto* handle = sys::dylib::open(path, mode);
+      if (!handle) {
+        return { .err = { "Failed to open dylib." } };
+      }
+      return {{ handle, path }};
+    }
+
+    template <typename T = void*>
+    inline auto sym(CStr symbol) -> Result<T> {
+      auto* ptr = sys::dylib::sym(handle, symbol);
+      if (!ptr) {
+        return { .err = { "Invalid symbol." } };
+      }
+
+      return { reinterpret_cast<T>(ptr) };
+    }
+
+    template <typename Ret, typename Fn, typename... Args>
+    inline auto invoke(CStr symbol, Args&&... args) -> Result<Ret> {
+      auto& [ptr, err] = this->sym<Fn>(symbol);
+      if (err) {
+        return { .err = err };
+      }
+
+      return { ptr(std::forward<Args>(args)...) };
+    }
+
+    inline auto reload(int mode = sys::dylib::Now) -> Result<Dylib&> {
+      this->close();
+      handle = sys::dylib::open(path, mode);
+
+      if (!handle) {
+        return { *this, { "Failed to reload dylib." } };
+      }
+
+      return { *this };
+    }
+
+    inline auto close() -> int {
+      return sys::dylib::close(handle);
+    }
+
+    ~Dylib() {
+      this->close();
+    }
+  };
+
+  struct MMap {
+    sys::io::Fd fd;
+    size_t size;
+    void* data;
+
+    inline static auto Read(CStr path) -> Result<MMap> {
+      auto fd = sys::io::open_fd_read(path);
+      if (fd == sys::io::FAILED) {
+        return { .err = { "Failed to open fd." } };
+      }
+
+      auto size = sys::io::get_fd_size(fd);
+      auto* data = sys::io::map_fd_read(fd, size);
+      if (!data) {
+        return { .err = { "Failed to map file." } };
+      }
+
+      return {{ fd, size, data }};
+    }
+
+    inline static auto Write(CStr path, size_t size) -> Result<MMap> {
+      auto fd = sys::io::open_fd_write(path);
+      if (fd == sys::io::FAILED) {
+        return { .err = { "Failed to open fd." } };
+      }
+      
+      auto* data = sys::io::map_fd_write(fd, size);
+      if (!data) {
+        return { .err = { "Failed to map file." } };
+      }
+
+      return {{ fd, size, data }};
+    }
+  };
+
+} // namespace bstb
+
+#endif // BSTB_IMPL || BSTB_RT
+
+#ifdef BSTB_IMPL
+
+#include <string_view>
+#include <filesystem>
+#include <iostream>
+#include <ranges>
+#include <thread>
+#include <vector>
+#include <span>
 
 namespace bstb::buffer {
 
@@ -216,7 +455,6 @@ namespace bstb::fs {
   using Path = std::filesystem::path;
   using Entry = std::filesystem::directory_entry;
 
-  [[nodiscard]]
   inline auto modified_after(const Path& path1, const Path& path2) -> bool {
     return std::filesystem::last_write_time(path1) > std::filesystem::last_write_time(path2);
   }
@@ -255,8 +493,153 @@ namespace bstb::fs {
     return filter_impl<std::filesystem::recursive_directory_iterator, Fn>(path, std::forward<Fn>(filter));
   }
 
-
 } // namespace bstb::fs
+
+namespace bstb::embedder {
+
+  namespace {
+    constexpr inline size_t DefaultRowSize = 20;
+
+    inline auto write_bytes_impl(char*& buf, char const* data, size_t size) -> void {
+      std::memcpy(buf, data, size);
+      buf += size;
+    }
+
+    inline auto write_hex_impl(char*& buf, unsigned char const* data, size_t size, size_t row_size) -> void {
+      constexpr static char hex[] = "0123456789ABCDEF";
+      for (size_t i = 0; i < size; ++i) {
+        const auto byte = data[i];
+        *buf++ = '0';
+        *buf++ = 'x';
+        *buf++ = hex[(byte >> 4) & 0xF];
+        *buf++ = hex[byte & 0xF];
+        *buf++ = ',';
+        *buf++ = ' ';
+        if ((i + 1) % row_size == 0 && i != size - 1) {
+          *buf++ = '\n';
+          *buf++ = '\t';
+        }
+      }
+
+      if (*(buf - 2) == ',') {
+        *(buf - 2) = ' ';
+      }
+    }
+
+    inline auto write_num_impl(char*& buf, size_t value) -> void {
+      char tmp[21];
+      char* idx = tmp + sizeof(tmp) - 1;
+      *idx = '\0';
+  
+      do {
+        *--idx = '0' + (value % 10);
+        value /= 10;
+      } while (value != 0);
+
+      while (*idx) {
+        *buf++ = *idx++;
+      }
+    }
+
+  } // namespace private
+
+  struct Config {
+    const std::string_view begin {};
+    
+    const std::string_view size_header {};
+    const std::string_view size_footer {};
+
+    const std::string_view data_header {};
+    const std::string_view data_footer {};
+
+    const std::string_view end {};
+  };
+
+  static auto embed_impl(CStr read_fname, CStr write_fname, size_t row_size, const Config& config) -> Result<void*> { // TODO: (Carter) Make this generic to define impl's for any language
+    const auto [
+      begin,
+      size_header,
+      size_footer,
+      data_header,
+      data_footer,
+      end
+    ] = config;
+
+    const auto text_size = (
+      begin.size() + size_header.size() + 
+      size_footer.size() + data_header.size() + 
+      data_footer.size() + end.size()
+    );
+
+    const auto [read_map, read_map_err] = MMap::Read(read_fname);
+    if (read_map_err) {
+      return { .err = read_map_err };
+    }
+
+    static constexpr int EMPTY_SIZE_CALC = -2; // TODO: (Carter) There's a logic error somewhere but this constant works
+    const auto bytes_for_size = (size_header.empty() && size_footer.empty()) ? EMPTY_SIZE_CALC : std::log10(read_map.size) - 1;
+    const auto rows = ((read_map.size + row_size - 1) / row_size) * 2;
+    const auto write_size = text_size + (read_map.size * 6) + rows + bytes_for_size;
+
+    auto [write_map, write_map_err] = MMap::Write(write_fname, write_size);
+    if (write_map_err) {
+      return { .err = write_map_err };
+    }
+
+    sys::io::fd_truncate(write_map.fd, write_size);
+
+    const auto* read_data = static_cast<unsigned char*>(read_map.data);
+    auto* write_data = static_cast<char*>(write_map.data);
+
+    if (!begin.empty()) {
+      write_bytes_impl(write_data, begin.data(), begin.size());
+    }
+      
+    if (bytes_for_size != EMPTY_SIZE_CALC) {
+      write_bytes_impl(write_data, size_header.data(), size_header.size());
+      write_num_impl(write_data, read_map.size);
+      write_bytes_impl(write_data, size_footer.data(), size_footer.size());
+    }
+
+    write_bytes_impl(write_data, data_header.data(), data_header.size());
+    write_hex_impl(write_data, read_data, read_map.size, row_size);
+    write_bytes_impl(write_data, data_footer.data(), data_footer.size());
+  
+    write_bytes_impl(write_data, end.data(), end.size());
+  
+    return {};
+  }
+
+  inline auto cpp(CStr read_fname, CStr write_fname, size_t row_size = DefaultRowSize) -> Result<void*> {
+    return embed_impl(read_fname, write_fname, row_size, {
+      .begin = "#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed file, define BSTB_EMBED to use.\n#else\n",
+      .size_header = "constexpr static unsigned long size = ",
+      .size_footer = ";\n",
+      .data_header = "template <typename T>\nconstexpr static T data = {\n\t",
+      .data_footer = "\n};\n",
+      .end = "#undef BSTB_EMBED\n#endif\n"
+    });
+  }
+
+  inline auto c(CStr read_fname, CStr write_fname, size_t row_size = DefaultRowSize) -> Result<void*> {
+    return embed_impl(read_fname, write_fname, row_size, {
+      .begin = "#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed file, define BSTB_EMBED to use.\n#else\n",
+      .size_header = "static const unsigned long size = ",
+      .size_footer = ";\n",
+      .data_header = "static const unsigned char data[] = {\n\t",
+      .data_footer = "\n};\n",
+      .end = "#undef BSTB_EMBED\n#endif\n"
+    });
+  }
+ 
+  inline auto py(CStr read_fname, CStr write_fname, size_t row_size = DefaultRowSize) -> Result<void*> {
+    return embed_impl(read_fname, write_fname, row_size, {
+      .data_header = "data = [\n\t",
+      .data_footer = "\n]\n",
+    });
+  }
+
+} // namespace bstb::embedder
 
 namespace bstb {
 
@@ -266,53 +649,20 @@ namespace bstb {
     { *std::end(container) } -> std::convertible_to<U>;
   };
 
-  struct Pipe {
-    Fd read;
-    Fd write;
-
-    [[nodiscard]]
-    constexpr static auto Inherited() -> Pipe {
-      return { STDIN_FILENO, STDOUT_FILENO };
-    }
-
-    [[nodiscard]]
-    static auto Owned(Fd read, Fd write) -> Pipe {
-      return { read, write };
-   }
-
-    [[nodiscard]]
-    static auto Null() -> Pipe { // TODO: (Carter) static vars in function are not free.
-      static auto read = open("/dev/null", O_RDONLY);
-      static auto write = open("/dev/null", O_WRONLY);
-
-      return { read, write };
-    }
-  };
-
   struct Future {
-    using Status = int;
+    sys::process::Pid pid;
 
-    Pid pid;
-
-    static auto wait(Pid pid) -> Status {
-      auto status = Status{};
-      waitpid(pid, &status, 0);
-
-      if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
+    inline auto wait() const -> Result<sys::process::Status> {
+      auto res = sys::process::wait(pid);
+      if (res == sys::process::FAILED) {
+        return { .err = { "Process did not execute properly." }};
       }
 
-      std::cerr << "Process did not execute properly. Status: " << status << '\n' << panic;
+      return { res };
     }
 
-    auto get() const -> Status {
-      return Future::wait(pid);
-    }
-
-    [[nodiscard]]
-    auto completed() const -> bool {
-      Status status;
-      return waitpid(pid, &status, WNOHANG) != 0;
+    inline auto completed() const -> bool {
+      return sys::process::completed(pid);
     }
   };
 
@@ -324,8 +674,6 @@ namespace bstb {
     }
 
     auto wait() -> void {
-      using namespace std::chrono_literals;
-
       while (!tasks.empty()) {
         auto it = tasks.begin();
         while (it != tasks.end()) {
@@ -335,10 +683,9 @@ namespace bstb {
             ++it;
           }
         }
-        std::this_thread::sleep_for(10ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
     }
-
   };
 
   struct Config {
@@ -355,75 +702,58 @@ namespace bstb {
       buffer.push(std::forward<Args>(args)...);
     }
 
-    template <typename Path>
-    auto arg(Path&& path) -> void requires (
-      std::same_as<std::remove_cvref_t<Path>, fs::Path> ||
-      std::same_as<std::remove_cvref_t<Path>, fs::Entry>
-    ) {
-      buffer.push(path.string());
-    }
-
     template <typename Iter>
-    requires IterableOver<Iter, std::string_view>
-    auto arg(Iter&& iter) -> void {
+    auto arg(Iter&& iter) -> void requires (IterableOver<Iter, std::string_view>) {
       for (auto&& arg : iter) {
         buffer.push(std::forward<std::decay_t<decltype(arg)>>(arg));
       }
     }
 
     template <typename Iter>
-    requires IterableOver<Iter, fs::Entry>
-    auto arg(Iter&& iter) -> void {
-      for (auto&& entry : iter) {
-        buffer.push(entry.path().string());
+    auto arg(Iter&& iter) -> void requires(IterableOver<Iter, fs::Entry>) {
+      for (auto&& arg : iter) {
+        buffer.push(arg.string_view());
       }
     }
 
-    auto exec(const Config& config) -> Pid {
+    auto exec(const Config& config) -> Result<sys::process::Pid> {
       if (config.verbose) {
         std::cout << buffer << std::endl;
       }
 
-      const auto child = fork();
-      if (child < 0) {
-        std::cerr << "Failed to fork process with error: " << child << '\n' << panic;
-      
-      } else if (child == 0) {
+      const auto* exec_args = buffer.exec_args();
 
-        const auto read = config.pipe.read;
-        const auto write = config.pipe.write;
+      const auto pid = sys::process::exec(
+        config.pipe.read,
+        config.pipe.write,
+        exec_args[0],
+        exec_args
+      );
 
-        if (read != STDIN_FILENO) {
-          dup2(read, STDIN_FILENO);
-        }
-
-        if (write != STDOUT_FILENO) {
-          dup2(write, STDOUT_FILENO);
-        }
-
-        const auto* exec_args = buffer.exec_args();
-        if (const auto err = execvp(exec_args[0], exec_args)) {
-          std::cerr << "Task exited abnormally: " << err << '\n' << panic;
-        }
-
+      if (pid == sys::process::FAILED) {
+        return { .err = { "Failed to execute Command." } };
       }
 
-      return child;
+      return { pid };
     }
 
-    auto run(const Config& config) -> Future::Status {
-      return Future::wait(Command::exec(config));
+    inline auto run(const Config& config) -> Result<sys::process::Status> {  
+      const auto status = sys::process::wait(this->exec(config));
+      if (status == sys::process::FAILED) {
+        return { .err { "Process did not complete." }};
+      }
+
+      return {{ status }};
     }
 
-    [[nodiscard]]
-    auto run_async(const Config& config) -> Future {
-      return Future { Command::exec(config) };
-    }
+    inline auto run_async(const Config& config) -> Result<Future> {
+      const auto [pid, err] = this->exec(config);
+      if (err) {
+        return { .err = err };
+      }
 
-    friend auto operator<<(std::ostream& os, Command& cmd) -> std::ostream& {
-      return os << cmd.buffer;
+      return {{ pid }};
     }
-
   };
 
   template <buffer::Buffer Buffer = buffer::Default, typename... Args>
@@ -439,6 +769,7 @@ namespace bstb {
   inline auto cmd(Args&&... args) -> Command<buffer::StackBuffer<Cap>> {
     return cmd<buffer::StackBuffer<Cap>>(std::forward<Args>(args)...);
   }
+
 
 } // namespace bstb
 
@@ -469,8 +800,20 @@ namespace bstb::compiler::impl {
       cmd.arg("-W", str);
     }
 
-    constexpr static auto include(Command& cmd, std::string_view str) -> void {
+    constexpr static auto define(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-D", str);
+    }
+
+    constexpr static auto include_path(Command& cmd, std::string_view str) -> void {
       cmd.arg("-I", str);
+    }
+
+    constexpr static auto link_path(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-L", str);
+    }
+
+    constexpr static auto link(Command& cmd, std::string_view str) -> void {
+      cmd.arg("-l", str);
     }
 
     constexpr static auto opt(Command& cmd, std::string_view str) -> void {
@@ -529,8 +872,23 @@ namespace bstb::compiler::style {
       return *this;
     }
 
-    constexpr auto include(std::string_view str) -> C& {
-      Impl::include(cmd, str);
+    constexpr auto define(std::string_view str) -> C& {
+      Impl::define(cmd, str);
+      return *this;
+    }
+
+    constexpr auto include_path(std::string_view str) -> C& {
+      Impl::include_path(cmd, str);
+      return *this;
+    }
+
+    constexpr auto link_path(std::string_view str) -> C& {
+      Impl::link_path(cmd, str);
+      return *this;
+    }
+
+    constexpr auto link(std::string_view str) -> C& {
+      Impl::link(cmd, str);
       return *this;
     }
 
@@ -554,7 +912,7 @@ namespace bstb::compiler::style {
       return *this;
     }
     
-    constexpr auto compile(const Config& config) -> Future::Status {
+    constexpr auto compile(const Config& config) -> decltype(auto) {
       return cmd.run(config);
     }
 
@@ -627,8 +985,8 @@ namespace bstb::compiler {
 
 namespace bstb {
 
-  inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
-const auto* target = args[0]; 
+inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
+    const auto* target = args[0]; 
 
     if (fs::modified_after(target, input)) {
       return;
@@ -636,15 +994,20 @@ const auto* target = args[0];
 
     std::cout << "Change detected. Rebuilding...\n";
 
-    const auto status = compiler::native<buffer::StackBuffer<100>>()
+    auto [status, err] = compiler::native<buffer::StackBuffer<100>>()
       .version("c++20")
+      .arch("arch=native")
+      .feature("lto")
+      .feature("no-exceptions")
+      .opt("z")
       .input(input)
       .output(target)
       .compile({});
 
-    if (status) {
-      std::cerr << "Failed to rebuild urself :(\n" << panic;
-    }
+    if (err) {
+      std::cerr << "Could not rebuild urself because: \n" << err.why() << std::endl;
+      std::exit(1);
+    } 
 
     cmd(args).run({ .pipe = Pipe::Inherited() });
 
@@ -653,89 +1016,6 @@ const auto* target = args[0];
 
   #define REBUILD_URSELF(argc, argv) bstb::rebuild(__FILE__, std::span<char*>(argv, static_cast<size_t>(argc)))
 
-  auto embed_into(CStr read_fname, CStr write_fname, size_t row_size = 20) -> void {
-    constexpr static auto embed_header = std::string_view{"#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed header, BSTB_EMBED must be defined in order to include it.\n#else\n"};
-
-    constexpr static auto size_header = std::string_view{"constexpr static unsigned long size = "};
-    constexpr static auto size_footer = std::string_view{";\n"};
-
-    constexpr static auto data_header = std::string_view{"constexpr static unsigned char bytes[] = {\n\t"};
-    constexpr static auto data_footer = std::string_view{"\n};\n#undef BSTB_EMBED\n#endif\n\0"};
-
-    constexpr static auto text_size = (
-      embed_header.size() + size_header.size() + 
-      size_footer.size() + data_header.size() + 
-      data_footer.size()
-    );
-
-    auto read_map = Map::Read(read_fname);
-
-    const auto bytes_for_size = std::log10(read_map.size) - 1;
-    const auto rows = ((read_map.size + row_size - 1) / row_size) * 2;
-    const auto write_size = text_size + (read_map.size * 6) + rows + bytes_for_size;
-
-    auto write_map = Map::Write(write_fname, write_size);
-    if (ftruncate(write_map.fd, write_size) == - 1) {
-      munmap(read_map.data, read_map.size);
-      close(read_map.fd);
-      std::cerr << "Failed to create and size output file: " << write_fname << '\n' << panic;
-    }
-
-    const auto* read_data = static_cast<unsigned char*>(read_map.data);
-    auto* write_data = static_cast<char*>(write_map.data);
-    
-    auto write_bytes = [&write_data](char const* data, size_t size) {
-      std::memcpy(write_data, data, size);
-      write_data += size;
-    };
-
-    auto write_hex = [&write_data, row_size](unsigned char const* data, size_t size) {
-      constexpr static char hex[] = "0123456789ABCDEF";
-      for (size_t i = 0; i < size; ++i) {
-        const auto byte = data[i];
-        *write_data++ = '0';
-        *write_data++ = 'x';
-        *write_data++ = hex[(byte >> 4) & 0xF];
-        *write_data++ = hex[byte & 0xF];
-        *write_data++ = ',';
-        *write_data++ = ' ';
-        if ((i + 1) % row_size == 0 && i != size - 1) {
-          *write_data++ = '\n';
-          *write_data++ = '\t';
-        }
-      }
-
-      if (*(write_data - 2) == ',') {
-        *(write_data - 2) = ' ';
-      }
-    };
-
-    auto write_num = [&write_data](size_t value) {
-      char tmp[21];
-      char* idx = tmp + sizeof(tmp) - 1;
-      *idx = '\0';
-  
-      do {
-        *--idx = '0' + (value % 10);
-        value /= 10;
-      } while (value != 0);
-
-      while (*idx) {
-        *write_data++ = *idx++;
-      }
-    };
-
-    write_bytes(embed_header.data(), embed_header.size());
-      
-    write_bytes(size_header.data(), size_header.size());
-    write_num(read_map.size);
-    write_bytes(size_footer.data(), size_footer.size());
-
-    write_bytes(data_header.data(), data_header.size());
-    write_hex(read_data, read_map.size);
-    write_bytes(data_footer.data(), data_footer.size());
-  }
-
 } // namespace bstb
 
-#endif
+#endif // BSTB_IMPL
