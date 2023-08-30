@@ -1,3 +1,4 @@
+#include <iterator>
 #if defined(BSTB_IMPL) || defined(BSTB_RT)
 
 #include <utility>
@@ -5,13 +6,13 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #error Michaelsoft Binbows is mean, all the functions are different plz help 
-#define system windows
+#define bstb_system windows
 
 namespace sys::windows {} // namespace sys::windows
 
 #elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 
-#define system linux
+#define bstb_system linux
 
 extern "C" {
   #include <sys/types.h>
@@ -28,7 +29,7 @@ using CStr = char const*;
 
 namespace sys::linux { 
 
-  using Env = char* const*;
+  using Env = char**;
 
   extern "C" Env environ;
 
@@ -47,7 +48,7 @@ namespace sys::linux {
     }
 
     inline auto open_fd_write(CStr path) -> Fd {
-      return open(path, O_WRONLY | O_CREAT | S_IRUSR, 0664);
+      return open(path, O_RDWR | O_CREAT, 0664);
     }
 
     inline auto get_fd_size(Fd fd) -> size_t {
@@ -147,7 +148,6 @@ namespace sys::linux {
       Local = RTLD_LOCAL,
       NoLoad = RTLD_NOLOAD,
       NoDelete = RTLD_NODELETE,
-      First = RTLD_FIRST,
     };
 
     inline auto open(CStr path, int mode) -> Handle {
@@ -170,20 +170,15 @@ namespace sys::linux {
 
 } // sys::linux
 
-#else // system
+#else // bstb_system
 
 #error Unsupported System for bootstrab implementation
 
-#endif // system
+#endif // bstb_system
 
 namespace sys {
 
-  using Env = system::Env;
-  inline Env environ = system::environ;
-
-  namespace io = system::io;
-  namespace process = system::process;
-  namespace dylib = system::dylib; 
+  using namespace sys::bstb_system;
 
 } // namespace sys
 
@@ -309,6 +304,7 @@ namespace bstb {
       }
       
       auto* data = sys::io::map_fd_write(fd, size);
+      sys::io::fd_truncate(fd, size);
       if (!data) {
         return { .err = { "Failed to map file." } };
       }
@@ -326,9 +322,11 @@ namespace bstb {
 #include <string_view>
 #include <filesystem>
 #include <iostream>
-#include <ranges>
+#include <fstream>
+#include <cstring>
 #include <thread>
 #include <vector>
+#include <cmath>
 #include <span>
 
 namespace bstb::buffer {
@@ -451,45 +449,126 @@ namespace bstb::buffer {
 } // namespace bstb::buffer
 
 namespace bstb::fs {
+  using namespace std::filesystem;
 
-  using Path = std::filesystem::path;
-  using Entry = std::filesystem::directory_entry;
+  enum class Create {
+    None,
+    File,
+    Dir,
+  };
 
-  inline auto modified_after(const Path& path1, const Path& path2) -> bool {
-    return std::filesystem::last_write_time(path1) > std::filesystem::last_write_time(path2);
+  inline auto make_path(const fs::path& _path, Create create = Create::None) -> fs::path {
+    if (!exists(_path)) {
+      switch (create) {
+        case Create::None: break;
+        case Create::File: {
+          auto _ = std::ofstream(_path, std::ios::out);
+        }
+        case Create::Dir: {
+          fs::create_directory(_path);
+        }
+      }
+    }
+    return _path;
+  }
+
+  inline auto modified_after(const path& path1, const path& path2) -> bool {
+    if (!fs::exists(path1)) {
+      return false;
+    }
+    if (!fs::exists(path2)) {
+      return true;
+    }
+    return last_write_time(path1) > last_write_time(path2);
   }
 
   namespace {
+    template <typename T, typename Pred>
+    struct Iter {
+      using iterator_category = typename std::input_iterator_tag;
+      using value_type = typename T::value_type;
+      using difference_type = typename T::difference_type;
+      using pointer = typename T::pointer;
+      using reference = typename T::reference;
+      
+      T curr;
+      T last {};
+      Pred pred;
+
+      explicit Iter(const T& _curr, Pred&& _pred) :
+        curr(_curr),
+        pred(std::forward<Pred>(_pred)) {
+          this->next();
+        }
+
+      auto operator++() -> Iter& {
+        ++curr;
+        this->next();
+        return *this;
+      }
+
+      auto operator*() const -> const reference {
+        return *curr;
+      }
+
+      auto operator->() const -> const pointer {
+        return &(*curr);
+      }
+
+      auto operator!=(const Iter& other) const -> bool {
+        return curr != other.curr;
+      }
+
+      auto next() -> void {
+        for (; curr != last && !pred(*curr); ++curr);
+      }
+    };
+
+    template <typename T, typename Pred>
+    struct Range {
+      using value_type = typename T::value_type;
+      using iterator = Iter<T, Pred>;
     
-    template <typename T>
-    auto iter_impl(const Path& path) -> decltype(auto) {
-      return T{ path };
-    }
+      T curr;
+      Pred&& pred;
+
+      auto begin() -> iterator {
+        return iterator(curr, std::forward<Pred>(pred));
+      }
+      
+      auto end() -> iterator {
+        return iterator({}, std::forward<Pred>(pred));
+      }
+    };
 
     template <typename T, typename Fn>
-    auto filter_impl(const Path& path, Fn&& filter) -> decltype(auto) {
-      return T{ path }
-        | std::views::filter(std::forward<Fn>(filter))
-        | std::views::transform([](auto&& entry) { return entry; });
+    auto filter_impl(const path& _path, Fn&& filter) -> Range<T, Fn> { 
+      return { T(_path), std::forward<Fn>(filter) };
+    }
+
+    template <typename T>
+    auto iter_impl(const path& _path) -> decltype(auto) {
+      auto pred = []([[maybe_unused]] auto&) { return true; };
+      return filter_impl<T, decltype(pred)>(_path, std::forward<decltype(pred)>(pred));
     }
 
   } // namespace private 
 
-  inline auto iter(const Path& path) -> decltype(auto) {
+  inline auto iter(const path& path) -> decltype(auto) {
     return iter_impl<std::filesystem::directory_iterator>(path);
   }
 
-  inline auto recursive_iter(const Path& path) -> decltype(auto) {
+  inline auto recursive_iter(const path& path) -> decltype(auto) {
     return iter_impl<std::filesystem::recursive_directory_iterator>(path);
   }
 
-  template <typename Fn>
-  inline auto filter(const Path& path, Fn&& filter) -> decltype(auto) {
+ template <typename Fn>
+  inline auto filter(const path& path, Fn&& filter) -> decltype(auto) {
     return filter_impl<std::filesystem::directory_iterator, Fn>(path, std::forward<Fn>(filter));
   }
- 
+
   template <typename Fn>
-  inline auto recursive_filter(const Path& path, Fn&& filter) -> decltype(auto) {
+  inline auto recursive_filter(const path& path, Fn&& filter) -> decltype(auto) {
     return filter_impl<std::filesystem::recursive_directory_iterator, Fn>(path, std::forward<Fn>(filter));
   }
 
@@ -555,7 +634,7 @@ namespace bstb::embedder {
     const std::string_view end {};
   };
 
-  static auto embed_impl(CStr read_fname, CStr write_fname, size_t row_size, const Config& config) -> Result<void*> { // TODO: (Carter) Make this generic to define impl's for any language
+  static auto embed_impl(const fs::path& read, const fs::path& write, size_t row_size, const Config& config) -> bool { 
     const auto [
       begin,
       size_header,
@@ -571,9 +650,9 @@ namespace bstb::embedder {
       data_footer.size() + end.size()
     );
 
-    const auto [read_map, read_map_err] = MMap::Read(read_fname);
+    const auto [read_map, read_map_err] = MMap::Read(read.c_str());
     if (read_map_err) {
-      return { .err = read_map_err };
+      return false;
     }
 
     static constexpr int EMPTY_SIZE_CALC = -2; // TODO: (Carter) There's a logic error somewhere but this constant works
@@ -581,12 +660,10 @@ namespace bstb::embedder {
     const auto rows = ((read_map.size + row_size - 1) / row_size) * 2;
     const auto write_size = text_size + (read_map.size * 6) + rows + bytes_for_size;
 
-    auto [write_map, write_map_err] = MMap::Write(write_fname, write_size);
+    auto [write_map, write_map_err] = MMap::Write(write.c_str(), write_size);
     if (write_map_err) {
-      return { .err = write_map_err };
+      return false;
     }
-
-    sys::io::fd_truncate(write_map.fd, write_size);
 
     const auto* read_data = static_cast<unsigned char*>(read_map.data);
     auto* write_data = static_cast<char*>(write_map.data);
@@ -607,10 +684,10 @@ namespace bstb::embedder {
   
     write_bytes_impl(write_data, end.data(), end.size());
   
-    return {};
+    return true;
   }
 
-  inline auto cpp(CStr read_fname, CStr write_fname, size_t row_size = DefaultRowSize) -> Result<void*> {
+  inline auto cpp(const fs::path& read_fname, const fs::path& write_fname, size_t row_size = DefaultRowSize) -> bool {
     return embed_impl(read_fname, write_fname, row_size, {
       .begin = "#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed file, define BSTB_EMBED to use.\n#else\n",
       .size_header = "constexpr static unsigned long size = ",
@@ -621,7 +698,7 @@ namespace bstb::embedder {
     });
   }
 
-  inline auto c(CStr read_fname, CStr write_fname, size_t row_size = DefaultRowSize) -> Result<void*> {
+  inline auto c(const fs::path& read_fname, const fs::path& write_fname, size_t row_size = DefaultRowSize) -> bool {
     return embed_impl(read_fname, write_fname, row_size, {
       .begin = "#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed file, define BSTB_EMBED to use.\n#else\n",
       .size_header = "static const unsigned long size = ",
@@ -632,7 +709,7 @@ namespace bstb::embedder {
     });
   }
  
-  inline auto py(CStr read_fname, CStr write_fname, size_t row_size = DefaultRowSize) -> Result<void*> {
+  inline auto py(const fs::path& read_fname, const fs::path& write_fname, size_t row_size = DefaultRowSize) -> bool {
     return embed_impl(read_fname, write_fname, row_size, {
       .data_header = "data = [\n\t",
       .data_footer = "\n]\n",
@@ -695,12 +772,7 @@ namespace bstb {
 
   template <buffer::Buffer Buffer>
   struct Command {
-    Buffer buffer;
-
-    template <typename... Args>
-    auto arg(Args&&... args) -> void {
-      buffer.push(std::forward<Args>(args)...);
-    }
+    Buffer buffer; 
 
     template <typename Iter>
     auto arg(Iter&& iter) -> void requires (IterableOver<Iter, std::string_view>) {
@@ -710,10 +782,22 @@ namespace bstb {
     }
 
     template <typename Iter>
-    auto arg(Iter&& iter) -> void requires(IterableOver<Iter, fs::Entry>) {
+    auto arg(Iter&& iter) -> void requires (IterableOver<Iter, fs::directory_entry>) {
       for (auto&& arg : iter) {
-        buffer.push(arg.string_view());
+        buffer.push(arg.path().c_str());
       }
+    } 
+
+    template <typename... Args>
+    auto arg(Args&&... args) -> void {
+      buffer.push(std::forward<Args>(args)...);
+    }
+
+    template <typename T>
+    auto arg(T&& path) -> void requires (
+      std::same_as<std::remove_cvref_t<T>, fs::path>
+    ) {
+      buffer.push(path.c_str());
     }
 
     auto exec(const Config& config) -> Result<sys::process::Pid> {
@@ -779,17 +863,20 @@ namespace bstb::compiler::impl {
   struct GNU {
     using Command = Command<Buffer>;
 
-    constexpr static auto arg(Command& cmd, std::string_view str) -> void {
-      cmd.arg(str);
+    template <typename T>
+    constexpr static auto arg(Command& cmd, T&& arg) -> void {
+      cmd.arg(std::forward<T>(arg));
     }
 
-    constexpr static auto input(Command& cmd, std::string_view str) -> void {
-      cmd.arg(str);
+    template <typename T>
+    constexpr static auto input(Command& cmd, T&& arg) -> void {
+      cmd.arg(std::forward<T>(arg));
     }
 
-    constexpr static auto output(Command& cmd, std::string_view str) -> void {
+    template <typename T>
+    constexpr static auto output(Command& cmd, T&& arg) -> void {
       cmd.arg("-o");
-      cmd.arg(str);
+      cmd.arg(std::forward<T>(arg));
     }
 
     constexpr static auto version(Command& cmd, std::string_view str) -> void {
@@ -804,8 +891,9 @@ namespace bstb::compiler::impl {
       cmd.arg("-D", str);
     }
 
-    constexpr static auto include_path(Command& cmd, std::string_view str) -> void {
-      cmd.arg("-I", str);
+    template <typename T>
+    constexpr static auto include_path(Command& cmd, T&& arg) -> void {
+      cmd.arg("-I", std::forward<T>(arg));
     }
 
     constexpr static auto link_path(Command& cmd, std::string_view str) -> void {
@@ -818,6 +906,10 @@ namespace bstb::compiler::impl {
 
     constexpr static auto opt(Command& cmd, std::string_view str) -> void {
       cmd.arg("-O", str);
+    }
+
+    constexpr static auto debug_info(Command& cmd) -> void {
+      cmd.arg("-g");
     }
 
     constexpr static auto no_exe(Command& cmd) -> void {
@@ -847,18 +939,21 @@ namespace bstb::compiler::style {
       cmd.arg(name);
     }
 
-    constexpr auto arg(std::string_view str) -> C& {
-      Impl::arg(cmd, str);
+    template <typename U>
+    constexpr auto arg(U&& arg) -> C& {
+      Impl::arg(cmd, std::forward<U>(arg));
       return *this;
     }
 
-    constexpr auto input(std::string_view str) -> C& {
-      Impl::input(cmd, str);
+    template <typename U>
+    constexpr auto input(U&& arg) -> C& {
+      Impl::input(cmd, std::forward<U>(arg));
       return *this;
     }
 
-    constexpr auto output(std::string_view str) -> C& {
-      Impl::output(cmd, str);
+    template <typename U>
+    constexpr auto output(U&& arg) -> C& {
+      Impl::output(cmd, std::forward<U>(arg));
       return *this;
     }
 
@@ -877,8 +972,9 @@ namespace bstb::compiler::style {
       return *this;
     }
 
-    constexpr auto include_path(std::string_view str) -> C& {
-      Impl::include_path(cmd, str);
+    template <typename U>
+    constexpr auto include_path(U&& str) -> C& {
+      Impl::include_path(cmd, std::forward<U>(str));
       return *this;
     }
 
@@ -897,8 +993,13 @@ namespace bstb::compiler::style {
       return *this;
     }
 
-    constexpr auto no_exe(std::string_view str) -> C& {
-      Impl::no_exe(cmd, str);
+    constexpr auto debug_info() -> C& {
+      Impl::debug_info(cmd);
+      return *this;
+    }
+
+    constexpr auto no_exe() -> C& {
+      Impl::no_exe(cmd);
       return *this;
     }
 
@@ -916,7 +1017,7 @@ namespace bstb::compiler::style {
       return cmd.run(config);
     }
 
-    constexpr auto compile_async(const Config& config) -> Future {
+    constexpr auto compile_async(const Config& config) -> decltype(auto) {
       return cmd.run_async(config);
     }
   };
@@ -997,6 +1098,7 @@ inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
     auto [status, err] = compiler::native<buffer::StackBuffer<100>>()
       .version("c++20")
       .arch("arch=native")
+      .arch("tune=native")
       .feature("lto")
       .feature("no-exceptions")
       .opt("z")
@@ -1004,9 +1106,9 @@ inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
       .output(target)
       .compile({});
 
-    if (err) {
+    if (status || err) {
       std::cerr << "Could not rebuild urself because: \n" << err.why() << std::endl;
-      std::exit(1);
+      std::exit(status);
     } 
 
     cmd(args).run({ .pipe = Pipe::Inherited() });
