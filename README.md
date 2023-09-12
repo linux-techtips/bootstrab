@@ -51,11 +51,11 @@ For more usage information, check out [examples](examples).
 
 ## TODO
 
-- [ ] File Embedding
-- [ ] Environment Integration
+- [X] File Embedding (Kinda)
 - [X] Multi-threading rework
-- [ ] Hot Code Reloading
-- [ ] Git Integration
-- [ ] Windows support (LOL)
+- [X] First class compiler support
 - [X] BYOB (Bring Your Own Buffers)
 - [X] Optimizsationsz
+- [ ] Fix Process error propogation
+- [ ] Windows support (LOL)
+- [ ] Dynamic Libraries

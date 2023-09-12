@@ -1,4 +1,7 @@
-#include <iterator>
+#if __cplusplus < 202002L
+  #error We are living in 2023, so we use C++ 20 now
+#else
+
 #if defined(BSTB_IMPL) || defined(BSTB_RT)
 
 #include <utility>
@@ -249,12 +252,12 @@ namespace bstb {
 
     template <typename Ret, typename Fn, typename... Args>
     inline auto invoke(CStr symbol, Args&&... args) -> Result<Ret> {
-      auto& [ptr, err] = this->sym<Fn>(symbol);
+      auto& [fn, err] = this->sym<Fn>(symbol);
       if (err) {
         return { .err = err };
       }
 
-      return { ptr(std::forward<Args>(args)...) };
+      return { fn(std::forward<Args>(args)...) };
     }
 
     inline auto reload(int mode = sys::dylib::Now) -> Result<Dylib&> {
@@ -322,6 +325,7 @@ namespace bstb {
 #include <string_view>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <fstream>
 #include <cstring>
 #include <thread>
@@ -692,7 +696,7 @@ namespace bstb::embedder {
       .begin = "#ifndef BSTB_EMBED\n\t#error This is a bootstrab embed file, define BSTB_EMBED to use.\n#else\n",
       .size_header = "constexpr static unsigned long size = ",
       .size_footer = ";\n",
-      .data_header = "template <typename T>\nconstexpr static T data = {\n\t",
+      .data_header = "template <typename T>\nconstexpr static T data[] = {\n\t",
       .data_footer = "\n};\n",
       .end = "#undef BSTB_EMBED\n#endif\n"
     });
@@ -861,66 +865,66 @@ namespace bstb::compiler::impl {
 
   template <buffer::Buffer Buffer>
   struct GNU {
-    using Command = Command<Buffer>;
+    using Cmd = Command<Buffer>;
 
     template <typename T>
-    constexpr static auto arg(Command& cmd, T&& arg) -> void {
+    constexpr static auto arg(Cmd& cmd, T&& arg) -> void {
       cmd.arg(std::forward<T>(arg));
     }
 
     template <typename T>
-    constexpr static auto input(Command& cmd, T&& arg) -> void {
+    constexpr static auto input(Cmd& cmd, T&& arg) -> void {
       cmd.arg(std::forward<T>(arg));
     }
 
     template <typename T>
-    constexpr static auto output(Command& cmd, T&& arg) -> void {
+    constexpr static auto output(Cmd& cmd, T&& arg) -> void {
       cmd.arg("-o");
       cmd.arg(std::forward<T>(arg));
     }
 
-    constexpr static auto version(Command& cmd, std::string_view str) -> void {
+    constexpr static auto version(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-std=", str);
     }
 
-    constexpr static auto warn(Command& cmd, std::string_view str) -> void {
+    constexpr static auto warn(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-W", str);
     }
 
-    constexpr static auto define(Command& cmd, std::string_view str) -> void {
+    constexpr static auto define(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-D", str);
     }
 
     template <typename T>
-    constexpr static auto include_path(Command& cmd, T&& arg) -> void {
+    constexpr static auto include_path(Cmd& cmd, T&& arg) -> void {
       cmd.arg("-I", std::forward<T>(arg));
     }
 
-    constexpr static auto link_path(Command& cmd, std::string_view str) -> void {
+    constexpr static auto link_path(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-L", str);
     }
 
-    constexpr static auto link(Command& cmd, std::string_view str) -> void {
+    constexpr static auto link(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-l", str);
     }
 
-    constexpr static auto opt(Command& cmd, std::string_view str) -> void {
+    constexpr static auto opt(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-O", str);
     }
 
-    constexpr static auto debug_info(Command& cmd) -> void {
+    constexpr static auto debug_info(Cmd& cmd) -> void {
       cmd.arg("-g");
     }
 
-    constexpr static auto no_exe(Command& cmd) -> void {
+    constexpr static auto no_exe(Cmd& cmd) -> void {
       cmd.arg("-c");
     }
 
-    constexpr static auto feature(Command& cmd, std::string_view str) -> void {
+    constexpr static auto feature(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-f", str);
     }
 
-    constexpr static auto arch(Command& cmd, std::string_view str) -> void {
+    constexpr static auto arch(Cmd& cmd, std::string_view str) -> void {
       cmd.arg("-m", str);
     }
   };
@@ -1097,11 +1101,6 @@ inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
 
     auto [status, err] = compiler::native<buffer::StackBuffer<100>>()
       .version("c++20")
-      .arch("arch=native")
-      .arch("tune=native")
-      .feature("lto")
-      .feature("no-exceptions")
-      .opt("z")
       .input(input)
       .output(target)
       .compile({});
@@ -1121,3 +1120,4 @@ inline auto rebuild(std::string_view input, std::span<char*>&& args) -> void {
 } // namespace bstb
 
 #endif // BSTB_IMPL
+#endif // C++ version
