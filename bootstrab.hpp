@@ -900,11 +900,13 @@ namespace bstb::compiler::impl {
       cmd.arg("-I", std::forward<T>(arg));
     }
 
-    constexpr static auto link_path(Cmd& cmd, std::string_view str) -> void {
+    template <typename T>
+    constexpr static auto link_path(Cmd& cmd, T&& str) -> void {
       cmd.arg("-L", str);
     }
 
-    constexpr static auto link(Cmd& cmd, std::string_view str) -> void {
+    template <typename T>
+    constexpr static auto link(Cmd& cmd, T&& str) -> void {
       cmd.arg("-l", str);
     }
 
@@ -982,12 +984,14 @@ namespace bstb::compiler::style {
       return *this;
     }
 
-    constexpr auto link_path(std::string_view str) -> C& {
+    template <typename U>
+    constexpr auto link_path(U&& str) -> C& {
       Impl::link_path(cmd, str);
       return *this;
     }
 
-    constexpr auto link(std::string_view str) -> C& {
+    template <typename U>
+    constexpr auto link(U&& str) -> C& {
       Impl::link(cmd, str);
       return *this;
     }
